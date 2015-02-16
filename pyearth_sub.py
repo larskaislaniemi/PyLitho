@@ -1,6 +1,36 @@
 import numpy as np
 
 
+def initTemp(STATUS, T, x):
+    # return values for initial temperature field
+
+    if not isinstance(x, np.ndarray):
+        raise Exception("x must be numpy.ndarray")
+
+    if not isinstance(T, np.ndarray):
+        raise Exception("T must be numpy.ndarray")
+
+    if len(T) != len(x):
+        raise Exception("Incompatible x and T")
+
+    if STATUS['CONFIG']['TINI_TYPE'] == 0:
+        T[:] = 0.0
+    elif STATUS['CONFIG']['TINI_TYPE'] == 1:
+        T[:] = 1519.0 * x[:]/STATUS['L'][1]
+    elif STATUS['CONFIG']['TINI_TYPE'] == 10:
+        # extra 30km overthrust
+        idx = x < 30e3
+        T[idx] = 750.0 * x[idx]/30e3
+
+        idx = (x >= 30e3) & (x < 30e3+STATUS['Moho_Depth'])
+        T[idx] = 750.0 * (x[idx]-30e3)/STATUS['Moho_Depth']
+
+        idx = x >= 30e3+STATUS['Moho_Depth']
+        T[idx] = 750.0 + (1250.0-750.0) * (x[idx]-(30e3+STATUS['Moho_Depth']))/(STATUS['L'][1]-(30e3+STATUS['Moho_Depth']))
+    else:
+        raise Exception("Invalid TINI_TYPE")
+
+
 def prod(x):
     ret = 1
     for i in x:

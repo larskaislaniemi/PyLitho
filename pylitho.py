@@ -14,6 +14,8 @@ cTfunc = pe.cT
 
 # **** END OF CONFIGURATION ****
 
+STATUS = { 'CONFIG' : CONFIG }
+
 
 if CONFIG['OUTPUT_FILE']:
     try:
@@ -38,15 +40,15 @@ if CONFIG['RESTART']:
     Restart_In_Path = CONFIG['RESTART_INDIR'] + "/" + CONFIG['RESTART_MODELNAME'] + "/"
 
 
-NX = CONFIG['NX']
-Erosion_Speed = CONFIG['EROSION_SPEED_M_MA'] / (1e6*365.25*24*60*60)
-Moho_Depth = CONFIG['MOHO_DEPTH_KM'] * 1e3
+STATUS['NX'] = CONFIG['NX']
+STATUS['Erosion_Speed'] = CONFIG['EROSION_SPEED_M_MA'] / (1e6*365.25*24*60*60)
+STATUS['Moho_Depth'] = CONFIG['MOHO_DEPTH_KM'] * 1e3
 SECINYR = 60*60*24*365.25
-L = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
-MaxTime = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
+STATUS['L'] = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
+STATUS['MaxTime'] = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
 
 # mesh
-xs = np.linspace(L[0], L[1], num=NX)
+xs = np.linspace(STATUS['L'][0], STATUS['L'][1], num=STATUS['NX'])
 # to demonstrate irreg grid:  + 4e3*(np.random.rand(NX)-0.5)
 
 if CONFIG['RHO0_TYPE'] == 0:
@@ -55,7 +57,7 @@ if CONFIG['RHO0_TYPE'] == 0:
 elif CONFIG['RHO0_TYPE'] == 1:
     # different rho0 for crust/mantle
     rho = 0.0 * xs + 2800
-    rho[xs > Moho_Depth] = 3300
+    rho[xs > STATUS['Moho_Depth']] = 3300
 else:
     raise Exception("Invalid RHO0_TYPE")
 
@@ -72,7 +74,7 @@ if CONFIG['C0_TYPE'] == 0:
 elif CONFIG['C0_TYPE'] == 1:
     #different c0 for crust/mantle
     c0 = 0.0 * xs + 800
-    c0[xs >= Moho_Depth] = 700
+    c0[xs >= STATUS['Moho_Depth']] = 700
 else:
     raise Exception("Invalid C0_TYPE")
 
@@ -82,8 +84,8 @@ if CONFIG['H0_TYPE'] == 0:
 elif CONFIG['H0_TYPE'] == 1:
     # constant heat prod in crust and mantle
     H = 0.0 * xs
-    H[xs < Moho_Depth] = 2.5e-6 # W m^-3
-    H[xs >= Moho_Depth] = 3300 * 5e-12
+    H[xs < STATUS['Moho_Depth']] = 2.5e-6 # W m^-3
+    H[xs >= STATUS['Moho_Depth']] = 3300 * 5e-12
 elif CONFIG['H0_TYPE'] == 2:
     # exponential decrease
     H_exp_param = 30e3
@@ -129,7 +131,7 @@ if CONFIG['RESTART']:
             Tin = np.append(Tin, float(row[2]))
             xsin = np.append(xsin, float(row[1]))
 
-    if len(np.where(xsin == xs)) == NX:
+    if len(np.where(xsin == xs)) == STATUS['NX']:
         Tini = np.copy(Tin)
         # all nodes at same locations
     else:
@@ -145,29 +147,7 @@ if CONFIG['RESTART']:
     rcsvfile.close()
 
 else:
-    # Set initial temperature field
-    if CONFIG['TINI_TYPE'] == 0:
-        Tini = np.linspace(0,0,NX)
-    elif CONFIG['TINI_TYPE'] == 1:
-        Tini = np.linspace(0,1519,NX)
-    elif CONFIG['TINI_TYPE'] == 10:
-        # extra 30km overthrust
-        Tini = np.linspace(0,0,NX)
-
-        idx = xs < 30e3
-        Tini[idx] = 750.0 * xs[idx]/30e3
-
-        idx = (xs >= 30e3) & (xs < 30e3+Moho_Depth)
-        Tini[idx] = 750.0 * (xs[idx]-30e3)/Moho_Depth
-
-        idx = xs >= 30e3+Moho_Depth
-        Tini[idx] = 750.0 + (1250.0-750.0) * (xs[idx]-(30e3+ Moho_Depth))/(L[1]-(30e3+Moho_Depth))
-
-        print Tini
-    else:
-        raise Exception("Invalid TINI_TYPE")
-
-
+    Tini = pe.initTemp(STATUS, xs)
     curtime = 0.0
 
 
@@ -180,7 +160,7 @@ new_T = np.copy(Tini)
 
 it = 0
 
-while curtime < MaxTime:
+while curtime < STATUS['MaxTime']:
 
     diffsChange = CONFIG['DIFFSCHANGE_ACCURACY'] + 1.0
 
@@ -204,9 +184,9 @@ while curtime < MaxTime:
 
     T = np.copy(new_T)
     
-    L[0] += Erosion_Speed * dt
+    STATUS['L'][0] += STATUS['Erosion_Speed'] * dt
     valueArrays = [T, H, c0, k0, rho]
-    pe.remesh(xs, L, valueArrays)
+    pe.remesh(xs, STATUS['L'], valueArrays)
 
     curtime += dt
 
@@ -236,7 +216,7 @@ if CONFIG['OUTPUT_FILE']:
 # for H decr exponentially:
 if CONFIG['KT_RELATION_TYPE'] == 1 and CONFIG['CT_RELATION_TYPE'] == 0 and \
                 CONFIG['K0_TYPE'] == 0 and CONFIG['H0_TYPE'] == 2 and \
-                Erosion_Speed == 0 and not CONFIG['RESTART']:
+                STATUS['Erosion_Speed'] == 0 and not CONFIG['RESTART']:
     T_analytical = (1.0/CONFIG['KT_RELATION_PARAMS'][0]) * \
                    ((1+CONFIG['KT_RELATION_PARAMS'][0]*Tsurf)  *
                       np.exp((CONFIG['KT_RELATION_PARAMS'][0]/K0val)*(H0val*H_exp_param*H_exp_param*(1-np.exp(-xs/H_exp_param))-H0val*H_exp_param*xs+q0*xs))
