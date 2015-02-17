@@ -17,8 +17,9 @@ CONFIG = {
     'RESTART_POST_MOD' : 0,   # post-restart modifications
 
     'NX' : 100,
-    'L_KM' : (0, 100), # in km
-    'MAXTIME_MA' : 1000, # in Ma
+    'L_KM' : (30, 130), # in km
+    'MAXTIME_MA' : 3000, # in Ma
+    'MAXRUNTIME_MA' : 3000, # in Ma
     'TSTEP_MULTI' : 0.5,
 
     'DIFFSCHANGE_ACCURACY' : 1e-10,  # max diffus. change, iteration criteria
