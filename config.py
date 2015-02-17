@@ -14,6 +14,7 @@ CONFIG = {
     'RESTART_INDIR' : "output",
     'RESTART_MODELNAME' : "test1",
     'RESTART_TSTEP' : 9450,
+    'RESTART_POST_MOD' : 0,   # post-restart modifications
 
     'NX' : 100,
     'L_KM' : (0, 100), # in km
@@ -26,7 +27,9 @@ CONFIG = {
 
     # ****
     # define type of initial T field
+    # if restart==True, use type -1 to prevent overwriting
     # ****
+    #'TINI_TYPE' : -1,
     'TINI_TYPE' : 0,
     #'TINI_TYPE' : 1,
     #'TINI_TYPE' : 10,

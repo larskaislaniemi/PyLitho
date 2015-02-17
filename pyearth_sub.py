@@ -13,7 +13,9 @@ def initTemp(STATUS, T, x):
     if len(T) != len(x):
         raise Exception("Incompatible x and T")
 
-    if STATUS['CONFIG']['TINI_TYPE'] == 0:
+    if STATUS['CONFIG']['TINI_TYPE'] == -1:
+        pass # T read at restart and no modification needed
+    elif STATUS['CONFIG']['TINI_TYPE'] == 0:
         T[:] = 0.0
     elif STATUS['CONFIG']['TINI_TYPE'] == 1:
         T[:] = 1519.0 * x[:]/STATUS['L'][1]
@@ -27,8 +29,11 @@ def initTemp(STATUS, T, x):
 
         idx = x >= 30e3+STATUS['Moho_Depth']
         T[idx] = 750.0 + (1250.0-750.0) * (x[idx]-(30e3+STATUS['Moho_Depth']))/(STATUS['L'][1]-(30e3+STATUS['Moho_Depth']))
+    elif STATUS['CONFIG']['TINI_TYPE'] == 101:
+        # T read at restart but we want to modify it
+        pass
     else:
-        raise Exception("Invalid TINI_TYPE")
+        raise Exception("Invalid TINI_TYPE " + str(STATUS['CONFIG']['TINI_TYPE']))
 
 
 def prod(x):
@@ -133,61 +138,95 @@ def diffstep(T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
     #new_T[NX-1] = 1350
 
 
-def remesh(curxs, newExt, arrays):
-    # NB : currently ignores new extent lower bnd
+def remesh(STATUS, curxs, newExt, arrays, extrapolation=0):
+    # modify curxs to newExt and interpolate values within the arrays
+    # newExt is either the extent (min,max)
+    # or an array of new xs
 
-    if newExt[0] == curxs[0] and newExt[1] == curxs[-1]:
-        # we're done here
-        return
+    NX = 0
 
-    NX = len(curxs)
-    #curL = (min(curxs), max(curxs))
+    if len(newExt) == 2:
+        if newExt[0] == curxs[0] and newExt[1] == curxs[-1]:
+            # we're done here
+            return
+        NX = STATUS['CONFIG']['NX']
+        newxs = np.linspace(newExt[0], newExt[1], num=NX)
+    else:
+        # newExt is an array of xs
+        if len(np.where(newExt == curxs)) == len(curxs):
+            # we're done here
+            return
+        NX = len(newExt)
+        newxs = np.copy(newExt)
 
-    #if curL[1] != newExt[1]:
-    #    raise Exception("Only surface level adjustment supported at the moment")
-
-    #newxs = np.copy(curxs)
-    #
-    #jumpedNodes = sum(curxs < newExt[0]) - 1
-    #
-    #if jumpedNodes == 0:
-    #    # surface level still within the first element
-    #    lowerAdjIndex = 2
-    #    newxs[0:(lowerAdjIndex+1)] = np.linspace(newExt[0], curxs[lowerAdjIndex], num=lowerAdjIndex+1)
-    #else:
-    #    lowerAdjIndex = jumpedNodes*2   # num of grid points to adjust is double of those actually jumped over
-    #    newxs[0:(lowerAdjIndex+1)] = np.linspace(newExt[0], curxs[lowerAdjIndex], num=lowerAdjIndex+1)
-
-    newxs = np.linspace(newExt[0], curxs[-1], num=NX)
+    addGridPoints = NX - len(curxs)
+    if addGridPoints != 0:
+        print "remesh(): Adding " + str(addGridPoints) + " grid points"
 
     # apply the new grid to the value arrays
     for i in range(len(arrays)):
-        newarr = np.copy(arrays[i])
-        interpolate(curxs, arrays[i], newxs, newarr)
+        newarr = np.zeros(NX)
+        interpolate(curxs, arrays[i], newxs, newarr, extrapolation)
+        if addGridPoints != 0:
+            arrays[i].resize(NX, refcheck=False)
         arrays[i][0:NX] = newarr[0:NX]
+
+    if addGridPoints != 0:
+        curxs.resize(NX, refcheck=False)
 
     curxs[0:NX] = newxs[0:NX]
 
     return None
 
+def posMin(arr):
+    return np.where(arr == min(arr[arr > 0]))
 
-def interpolate(xs1, arr1, xs2, arr2):
+def findPoint(xs, val):
+    # returns the first point in xs that is larger than loc
+    dist = xs - val
+    i = posMin(dist)
+    if len(i[0]) != 1:
+        raise Exception("Error in findPoint()")
+    #print "Looking for " + str(val) + ", found between " + str(xs[i[0][0]]) + " and " + str(xs[i[0][0]-1])
+    return i[0][0]
+
+
+def interpolate(xs1, arr1, xs2, arr2, extrapolation):
     # interpolate from arr1 to arr2
 
-    if min(xs1) > min(xs2) or max(xs1) < max(xs2):
-        raise Exception("This is for interpolation, not extrapolation!")
-
     for i in range(len(xs2)):
-        idx = xs2[i] == xs1
-        nSameNodes = len(np.where(idx)[0])
-        #nSameNodes = sum(idx)
-        if nSameNodes == 0:
-            # interpolate, linear
-            idx2 = np.where(xs1 > xs2[i])[0][0]
-            idx1 = idx2 - 1
-            arr2[i] = arr1[idx1] + (xs2[i] - xs1[idx1]) * (arr1[idx2] - arr1[idx1]) / (xs1[idx2] - xs1[idx1])
-        elif nSameNodes == 1:
-            # copy value directly
-            arr2[i] = arr1[np.where(idx)]
-        elif nSameNodes > 1:
-            raise Exception("Invalid grid xs1: multiple same values")
+        if xs2[i] < xs1[0]:
+            if extrapolation == 1:
+                arr2[i] = np.NaN
+            elif extrapolation == 2:
+                #sizeDiff = xs1[0] - xs2[0]
+                relloc = xs2[i] - xs2[0]
+                #print sizeDiff, relloc
+                j = findPoint(xs1-xs1[0], relloc)
+                ##############################arr2[i] = arr1[j-1] + (relloc - xs1[j-1]) * (arr1[j] - arr1[j-1]) / (xs1[j] - xs1[j-1])
+                #arr2[i] = arr1[j-1]
+                arr2[i] = arr1[j-1] + (relloc+xs1[0] - xs1[j-1]) * (arr1[j] - arr1[j-1]) / (xs1[j] - xs1[j-1])
+                #print xs1[j-1], relloc+xs1[0], xs1[j]
+            else:
+                raise Exception("Don't know how to extrapolate")
+        elif xs2[i] > xs1[-1]:
+            if extrapolation == 1:
+                arr2[i] = np.NaN
+            elif extrapolation == 2:
+                raise Exception("Extrapolation: Copying at the lower bnd not supported yet")
+            else:
+                raise Exception("Don't know how to extrapolate")
+        else:
+            idx = xs2[i] == xs1
+            nSameNodes = len(np.where(idx)[0])
+            #nSameNodes = sum(idx)
+            if nSameNodes == 0:
+                # interpolate, linear
+                idx2 = np.where(xs1 > xs2[i])[0][0]
+                idx1 = idx2 - 1
+                arr2[i] = arr1[idx1] + (xs2[i] - xs1[idx1]) * (arr1[idx2] - arr1[idx1]) / (xs1[idx2] - xs1[idx1])
+            elif nSameNodes == 1:
+                # copy value directly
+                arr2[i] = arr1[np.where(idx)]
+            elif nSameNodes > 1:
+                raise Exception("Invalid grid xs1: multiple same values")

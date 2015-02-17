@@ -1,11 +1,14 @@
-# import sys
+import sys
 import numpy as np
 import pyearth_sub as pe
 from matplotlib import pyplot as plt
 import csv
 import os
+
+sys.path.insert(0, ".")
 from config import CONFIG
 
+#print sys.path
 
 # **** CONFIGURATION ****
 
@@ -46,6 +49,7 @@ STATUS['Moho_Depth'] = CONFIG['MOHO_DEPTH_KM'] * 1e3
 SECINYR = 60*60*24*365.25
 STATUS['L'] = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
 STATUS['MaxTime'] = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
+STATUS['MaxRunTime'] = CONFIG['MAXRUNTIME_MA'] * SECINYR * 1e6
 
 # mesh
 xs = np.linspace(STATUS['L'][0], STATUS['L'][1], num=STATUS['NX'])
@@ -110,7 +114,7 @@ if CONFIG['RESTART']:
     for row in csvmetareader:
         if not row[0].isdigit():
             continue
-        print row[0], CONFIG['RESTART_TSTEP']
+        #print row[0], CONFIG['RESTART_TSTEP']
         if int(row[0]) == CONFIG['RESTART_TSTEP']:
             rowfound = True
             curtime = float(row[1]) * SECINYR * 1e6
@@ -131,24 +135,38 @@ if CONFIG['RESTART']:
             Tin = np.append(Tin, float(row[2]))
             xsin = np.append(xsin, float(row[1]))
 
-    if len(np.where(xsin == xs)) == STATUS['NX']:
+    if len(xsin) == len(xs) and len(np.where(xsin == xs)) == STATUS['NX']:
         Tini = np.copy(Tin)
         # all nodes at same locations
     else:
-        if xsin[-1] != xs[-1]:
-            raise Exception("Restart: lower boundaries do not match")
-        elif xsin[0] < xs[0]:
-            raise Exception("Restart: restarted upper bnd at upper level than configured one")
+        # nodes and/or extent in file read from restart file do not match those
+        # configured in config file
+
+        # changes in extent during restart not allowed
+        if xsin[0] != xs[0] or xsin[-1] != xs[-1]:
+            raise Exception("Changes in extent during restart not allowed.")
         else:
-            Tini = xs * 0.0
-            valueArrays = [Tini, H, c0, k0, rho]
-            pe.remesh(xs, np.array((xsin[0],xsin[-1])), valueArrays)
+            # match grid points, result must follow gridding configured in config file
+            valueArrays = [Tin]
+            pe.remesh(STATUS, xsin, xs, valueArrays)
+            Tini = np.copy(Tin)
 
     rcsvfile.close()
-
 else:
-    Tini = pe.initTemp(STATUS, xs)
+    Tini = np.array([0.0] * CONFIG['NX'])
     curtime = 0.0
+
+pe.initTemp(STATUS, Tini, xs)
+
+
+if CONFIG['RESTART_POST_MOD'] == 0:
+    pass # nothing
+elif CONFIG['RESTART_POST_MOD'] == 1:
+    STATUS['L'][0] -= 30e3  # raise the surface by 30km => overthrust
+    valueArrays = [Tini, H, c0, k0, rho]
+    #print Tini
+    pe.remesh(STATUS, xs, STATUS['L'], valueArrays, extrapolation=2)
+    #print Tini
 
 
 # bnd cond
@@ -160,7 +178,13 @@ new_T = np.copy(Tini)
 
 it = 0
 
-while curtime < STATUS['MaxTime']:
+
+plt.plot(Tini, -xs, 'ro-')
+plt.show()
+
+starttime = curtime
+
+while (curtime < STATUS['MaxTime']) and (curtime-starttime < STATUS['MaxRunTime']):
 
     diffsChange = CONFIG['DIFFSCHANGE_ACCURACY'] + 1.0
 
@@ -186,7 +210,7 @@ while curtime < STATUS['MaxTime']:
     
     STATUS['L'][0] += STATUS['Erosion_Speed'] * dt
     valueArrays = [T, H, c0, k0, rho]
-    pe.remesh(xs, STATUS['L'], valueArrays)
+    pe.remesh(STATUS, xs, STATUS['L'], valueArrays)
 
     curtime += dt
 
@@ -228,6 +252,7 @@ else:
 fig, (ax0, ax1) = plt.subplots(ncols=2, figsize=(8, 4))
 ax0.plot(T, -xs, 'ro-')
 ax0.plot(T_analytical, -xs, 'g-')
+ax0.plot(Tini, -xs, 'b-')
 ax1.plot(kold, -xs, 'ro-')
 plt.tight_layout()
 plt.show()
