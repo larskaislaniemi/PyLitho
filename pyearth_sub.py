@@ -94,7 +94,7 @@ def maxdt(k, rho, cp, xs):
     return min(0.5 * dx * dx / Khalf)
 
 
-def diffstep(T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
+def diffstep(STATUS, T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
     NX = np.size(T)
 
     if NX != np.size(new_T):
@@ -134,8 +134,41 @@ def diffstep(T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
     #    new_T[ix] = new_T[ix] + H[ix] * dt / (rho[ix] * cp[ix])
     
     # lower bnd
-    new_T[NX-1] = q0 * dx[NX-2] / khalf[NX-2] + T[NX-2]
-    #new_T[NX-1] = 1350
+    if STATUS['CONFIG']['BND_BOT_TYPE'] == 1:
+        new_T[NX-1] = q0 * dx[NX-2] / khalf[NX-2] + T[NX-2]
+    elif STATUS['CONFIG']['BND_BOT_TYPE'] == 9:
+        # TODO:
+        # fix this
+        TL = 1100.0
+        try:
+            botloc = min(np.where(new_T >= TL)[0])
+        except ValueError:
+            botloc = NX-1
+
+        botq = (rho[botloc]**2 * cp[botloc] * 1.0**4 * 60.0**4 * 9.81 * 3.5e-5 * (xs[botloc]-xs[0])**2) \
+               / (1e19*new_T[botloc]**2)
+
+        new_T[botloc] = botq * dx[botloc-1] / khalf[botloc-1] + T[botloc-1]
+        if botloc < NX-1:
+            new_T[botloc:(NX-1)] = new_T[botloc]
+
+        #print botq, botloc
+    else:
+        raise Exception("Invalid BND_BOT_TYPE")
+
+
+def getErosionSpeed(STATUS):
+    if STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 0:
+        STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
+
+    elif STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 1:
+        if (STATUS['curTime'] - STATUS['ModelStartTime']) / (1e6 * STATUS['SECINYR']) > 300:
+            STATUS['Erosion_Speed'] = 0.0
+        else:
+            STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
+
+    else:
+        raise Exception("Invalid EROSION_SPEED_TYPE")
 
 
 def remesh(STATUS, curxs, newExt, arrays, extrapolation=0):
@@ -149,14 +182,39 @@ def remesh(STATUS, curxs, newExt, arrays, extrapolation=0):
         if newExt[0] == curxs[0] and newExt[1] == curxs[-1]:
             # we're done here
             return
-        NX = STATUS['CONFIG']['NX']
-        newxs = np.linspace(newExt[0], newExt[1], num=NX)
+        NX = STATUS['NX']
+        if newExt[1] == curxs[-1]:
+            # bottom location hasn't changed
+
+            if (newExt[0] > curxs[0]) and (newExt[0] < curxs[1]):
+                # only the uppermost grid point "has" moved
+                #print newExt[0], curxs[0], curxs[1], curxs[2]
+                if (curxs[1] - newExt[0]) < 0.5 * (curxs[2] - curxs[1]):
+                    # grid spacing getting too tight, remove uppermost grid point
+                    newxs = np.zeros(NX-1)
+                    newxs[:] = curxs[1:]
+                    newxs[0] = newExt[0]
+                    NX = NX-1
+                    STATUS['NX'] = NX
+                    #print NX
+                else:
+                    newxs = np.copy(curxs)
+                    newxs[0] = newExt[0]
+            else:
+                # TODO:
+                # make this better so that a jump over one grid point
+                # is also properly handled without extra interpolations
+                newxs = np.linspace(newExt[0], newExt[1], num=NX)
+        else:
+            newxs = np.linspace(newExt[0], newExt[1], num=NX)
+
     else:
         # newExt is an array of xs
         if len(np.where(newExt == curxs)) == len(curxs):
             # we're done here
             return
         NX = len(newExt)
+        STATUS['NX'] = NX
         newxs = np.copy(newExt)
 
     addGridPoints = NX - len(curxs)
@@ -183,11 +241,13 @@ def posMin(arr):
 
 def findPoint(xs, val):
     # returns the first point in xs that is larger than loc
+    # raises ValueError is not found
+    # returns the last occurrence
     dist = xs - val
     i = posMin(dist)
+
     if len(i[0]) != 1:
         raise Exception("Error in findPoint()")
-    #print "Looking for " + str(val) + ", found between " + str(xs[i[0][0]]) + " and " + str(xs[i[0][0]-1])
     return i[0][0]
 
 
@@ -199,14 +259,9 @@ def interpolate(xs1, arr1, xs2, arr2, extrapolation):
             if extrapolation == 1:
                 arr2[i] = np.NaN
             elif extrapolation == 2:
-                #sizeDiff = xs1[0] - xs2[0]
                 relloc = xs2[i] - xs2[0]
-                #print sizeDiff, relloc
                 j = findPoint(xs1-xs1[0], relloc)
-                ##############################arr2[i] = arr1[j-1] + (relloc - xs1[j-1]) * (arr1[j] - arr1[j-1]) / (xs1[j] - xs1[j-1])
-                #arr2[i] = arr1[j-1]
                 arr2[i] = arr1[j-1] + (relloc+xs1[0] - xs1[j-1]) * (arr1[j] - arr1[j-1]) / (xs1[j] - xs1[j-1])
-                #print xs1[j-1], relloc+xs1[0], xs1[j]
             else:
                 raise Exception("Don't know how to extrapolate")
         elif xs2[i] > xs1[-1]:
@@ -218,8 +273,8 @@ def interpolate(xs1, arr1, xs2, arr2, extrapolation):
                 raise Exception("Don't know how to extrapolate")
         else:
             idx = xs2[i] == xs1
-            nSameNodes = len(np.where(idx)[0])
-            #nSameNodes = sum(idx)
+            whereIdx = np.where(idx)
+            nSameNodes = len(whereIdx[0])
             if nSameNodes == 0:
                 # interpolate, linear
                 idx2 = np.where(xs1 > xs2[i])[0][0]
@@ -227,6 +282,6 @@ def interpolate(xs1, arr1, xs2, arr2, extrapolation):
                 arr2[i] = arr1[idx1] + (xs2[i] - xs1[idx1]) * (arr1[idx2] - arr1[idx1]) / (xs1[idx2] - xs1[idx1])
             elif nSameNodes == 1:
                 # copy value directly
-                arr2[i] = arr1[np.where(idx)]
+                arr2[i] = arr1[whereIdx]
             elif nSameNodes > 1:
                 raise Exception("Invalid grid xs1: multiple same values")
