@@ -137,9 +137,7 @@ def diffstep(STATUS, T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
     if STATUS['CONFIG']['BND_BOT_TYPE'] == 1:
         new_T[NX-1] = q0 * dx[NX-2] / khalf[NX-2] + T[NX-2]
     elif STATUS['CONFIG']['BND_BOT_TYPE'] == 9:
-        # TODO:
-        # fix this
-        TL = 1100.0
+        TL = 1250.0
         try:
             botloc = min(np.where(new_T >= TL)[0])
         except ValueError:
@@ -148,9 +146,8 @@ def diffstep(STATUS, T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
         botq = (rho[botloc]**2 * cp[botloc] * 1.0**4 * 60.0**4 * 9.81 * 3.5e-5 * (xs[botloc]-xs[0])**2) \
                / (1e19*new_T[botloc]**2)
 
-        new_T[botloc] = botq * dx[botloc-1] / khalf[botloc-1] + T[botloc-1]
-        if botloc < NX-1:
-            new_T[botloc:(NX-1)] = new_T[botloc]
+        for ix in range(botloc, NX):
+            new_T[ix] = botq * dx[ix-1] / khalf[ix-1] + T[ix-1]
 
         #print botq, botloc
     else:
