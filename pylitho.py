@@ -8,12 +8,8 @@ import os
 sys.path.insert(0, ".")
 from config import CONFIG
 
-# **** CONFIGURATION ****
-
 kTfunc = pe.kT
 cTfunc = pe.cT
-
-# **** END OF CONFIGURATION ****
 
 DATA_FORMAT_VERSION = 1   # increase when output data format changes
 

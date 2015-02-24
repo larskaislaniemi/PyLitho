@@ -253,7 +253,9 @@ def interpolate(xs1, arr1, xs2, arr2, extrapolation):
 
     for i in range(len(xs2)):
         if xs2[i] < xs1[0]:
-            if extrapolation == 1:
+            if extrapolation <= 0:
+                arr2[i] = -extrapolation
+            elif extrapolation == 1:
                 arr2[i] = np.NaN
             elif extrapolation == 2:
                 relloc = xs2[i] - xs2[0]
