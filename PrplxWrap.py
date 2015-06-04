@@ -12,7 +12,7 @@ class perplex:
     components = []   # will hold the oxide names
     ncomp = 0
 
-    lib_meemum = cdll.LoadLibrary('/Users/larskaislaniemi/Code/perplex668/libmeemum.so') # this has to be compiled with gfortran, not gcc
+    #lib_meemum = cdll.LoadLibrary('/Users/larskaislaniemi/Code/perplex668/libmeemum.so') # this has to be compiled with gfortran, not gcc
     libpx = cdll.LoadLibrary('/Users/larskaislaniemi/Code/PrplxWrap/libperplex.so')
 
     syspropnum = {
