@@ -10,10 +10,11 @@ class Crust:
     def __init__(self):
         self.config = {
             'DT_MULTIPLIER' : 0.5,
-            'DT_MULTIPLIER_MAX' : 0.9,
-            'CP_ITER_THRESHOLD' : 1e-4,  # converge criteria for Cp iteration,
-                                         # (Cp_new - Cp_old)/Cp_new has to be smaller than this
-            'GRID_NX' : 20,     # num of grid points (= num of elements + 1)
+#            'DT_MULTIPLIER_MAX' : 0.9,
+#            'CP_ITER_THRESHOLD' : 1e-4,  # converge criteria for Cp iteration,
+#                                         # (Cp_new - Cp_old)/Cp_new has to be smaller than this
+            'T_ITER_THRESHOLD' : 1e-1,   # converge criteria for dT=f(dH) iteration (Kelvins)
+            'GRID_NX' : 30,     # num of grid points (= num of elements + 1)
             'GRID_H' : 5000.0,  # height of the model, meters
             'BND_UPPER_PRESSURE' : 20000.0,           # pressure at the upper boundary, bar
             'BND_UPPER_TEMPERATURE' : 273.0 + 1000.0, # temperature at the upper boundary, Kelvin
@@ -62,7 +63,7 @@ class Crust:
         self.pres_e = self.getIniField("pressure", self.xs_e)     # bar
         self.pres = self.getIniField("pressure", self.xs)
         self.mass_e = self.getIniField("mass", self.xs_e)         # kg
-        #self.T = self.getIniField("temp", self.xs)                # K # seems not to be needed....
+        #self.T = self.getIniField("temp", self.xs)               # K # seems not to be needed....
 
         # generate initial info by perplex
         self.updatePerplex()
@@ -78,13 +79,17 @@ class Crust:
             self.pres_e[i] = self.pres[i]   # simplification: the pressure of the element is the pressure
                                             # at the upper surface of the element
 
-    def updatePerplex(self):
+    def updatePerplex(self, ielem=-1):
         #self.updatePressure()
-        self.perplexResult = []
+        if ielem < 0:
+            self.perplexResult = []
         for i in range(self.ne):
             self.pres[i] = self.bnd_upper_pressure + sum(self.rho_e[0:i] * self.accel_g * (self.xs[i+1]-self.xs[i])) * 1e-5
             self.pres_e[i] = self.pres[i]
-            self.perplexResult.append(self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i]))
+            if ielem < 0:
+                self.perplexResult.append(self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i]))
+            elif ielem == i:
+                self.perplexResult[ielem] = self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i])
         self.perplexOK = True
 
     def updateCpRho(self):
@@ -102,16 +107,63 @@ class Crust:
         maxdt = min(0.5 * dx * dx / diff)
         return maxdt
 
+    def addEnthalpy(self, ielem, dH):
+        # input:
+        #  ielem: element to which the enthalpy is added
+        #  dH:    amount of added enthalpy [J]
+
+        if not self.perplexOK:
+            self.updatePerplex()  # to make sure pressure field is OK.
+                                  # probably unnecessary.
+
+        doNewIteration = True
+
+        # dH is given in Joules (total), transform to J/kg
+        dH = dH / (self.rho_e[ielem] * (self.xs[ielem+1] - self.xs[ielem]))
+
+        Cp0 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
+        T0 = self.T_e[ielem]
+        H0 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['H']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
+        Tini = T0
+        Hini = H0
+
+        niter = 0
+        stepDecr = 1e10   # decrease in solution between successive steps
+        stepMultip = 1.0
+
+        while doNewIteration:
+            T1 = T0 - stepMultip * (H0-Hini-dH) / Cp0
+            #print T0, "->", T1
+            #print "-(H0-Hini-dH) / Cp0 =", -(H0-Hini-dH)/Cp0, ", H0 =", H0, ", stepMultip =", stepMultip
+            self.T_e[ielem] = T1
+            self.updatePerplex(ielem)
+            H1 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['H']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
+            Cp1 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
+
+            if abs(T1-T0) < self.config['T_ITER_THRESHOLD']:
+                doNewIteration = False
+            else:
+                if abs(T1-T0) >= stepDecr:
+                    # halve the step
+                    stepMultip = stepMultip / 2.0
+                stepDecr = abs(T1-T0)
+                niter = niter + 1
+                T0 = T1
+                H0 = H1
+                Cp0 = Cp1
+
+        #if niter > 0:
+        #    print "Needed", niter, "iterations"
+
+        return T1-Tini
+
+
     def diffuseT(self, dt = 0.0):
         self.timestep = self.timestep + 1
         print " * Diffusion, time step", self.timestep, ", time = ", (self.time / SECINYR), " yrs"
         self.updateCpRho()
         self.updatePressure()
 
-        doNewIteration = True
-        niterations = 0
-
-        self.T_e_old = np.copy(self.T_e)
         T_e = self.T_e
 
         if dt == 0:
@@ -119,74 +171,49 @@ class Crust:
             dt = self.config['DT_MULTIPLIER'] * self.maxdt()
             self.last_dt = dt
 
-        firstIteration = True
+        # calculate conductivity for main grid points by averaging from elements
+        k_g =       0.5 * (self.xs[2:self.nx] - self.xs[1:(self.nx-1)]) * self.k_e[1:self.ne]
+        k_g = k_g + 0.5 * (self.xs[1:(self.nx-1)] - self.xs[0:(self.nx-2)]) * self.k_e[0:(self.ne-1)]
+        k_g = k_g / (0.5 * (self.xs[2:self.nx] - self.xs[0:(self.nx-2)]))
+        n_kg = k_g.size
 
-        while doNewIteration:
-            # calculate conductivity for main grid points by averaging from elements
-            k_g =       0.5 * (self.xs[2:self.nx] - self.xs[1:(self.nx-1)]) * self.k_e[1:self.ne]
-            k_g = k_g + 0.5 * (self.xs[1:(self.nx-1)] - self.xs[0:(self.nx-2)]) * self.k_e[0:(self.ne-1)]
-            k_g = k_g / (0.5 * (self.xs[2:self.nx] - self.xs[0:(self.nx-2)]))
-            n_kg = k_g.size
+        ## heat diffusion for
+        # ... internal grid points.
+        # At elemental grid points we define T, rho, Cp, k, d2T/dz2;
+        # at main grid points we define dT/dz.
+        dT1 = k_g[1:n_kg]     * (T_e[2:self.ne]     - T_e[1:(self.ne-1)]) / (self.xs_e[2:self.ne]     - self.xs_e[1:(self.ne-1)])
+        dT2 = k_g[0:(n_kg-1)] * (T_e[1:(self.ne-1)] - T_e[0:(self.ne-2)]) / (self.xs_e[1:(self.ne-1)] - self.xs_e[0:(self.ne-2)])
+        d2T = (dT1 - dT2) / (0.5 * (self.xs_e[2:self.ne] - self.xs_e[0:(self.ne-2)]))
+        #DTinternal = d2T * dt / (self.rho_e[1:(self.ne-1)] * self.Cp_e[1:(self.ne-1)])
+        DHinternal = d2T * dt   # J/m3
+        DHinternal = DHinternal * (self.xs[2:(self.nx-1)] - self.xs[1:(self.nx-2)])
 
-            ## heat diffusion for
-            # ... internal grid points.
-            # At elemental grid points we define T, rho, Cp, k, d2T/dz2;
-            # at main grid points we define dT/dz.
-            dT1 = k_g[1:n_kg]     * (T_e[2:self.ne]     - T_e[1:(self.ne-1)]) / (self.xs_e[2:self.ne]     - self.xs_e[1:(self.ne-1)])
-            dT2 = k_g[0:(n_kg-1)] * (T_e[1:(self.ne-1)] - T_e[0:(self.ne-2)]) / (self.xs_e[1:(self.ne-1)] - self.xs_e[0:(self.ne-2)])
-            d2T = (dT1 - dT2) / (0.5 * (self.xs_e[2:self.ne] - self.xs_e[0:(self.ne-2)]))
-            DTinternal = d2T * dt / (self.rho_e[1:(self.ne-1)] * self.Cp_e[1:(self.ne-1)])
+        # ... uppermost grid point
+        dT1 = k_g[0]     * (T_e[1]     - T_e[0]) / (self.xs_e[1]     - self.xs_e[0])
+        dT2 = self.k_e[0] * (T_e[0] - self.bnd_upper_temperature) / (self.xs_e[0]-self.xs[0])
+        d2T = (dT1 - dT2) / (0.5 * (self.xs_e[1] - (-self.xs_e[0] + self.xs[0])))
+        #DTupper = d2T * dt / (self.rho_e[0] * self.Cp_e[0])
+        DHupper = d2T * dt
+        DHupper = DHupper * (self.xs[1] - self.xs[0])
 
-            # ... uppermost grid point
-            dT1 = k_g[0]     * (T_e[1]     - T_e[0]) / (self.xs_e[1]     - self.xs_e[0])
-            dT2 = self.k_e[0] * (T_e[0] - self.bnd_upper_temperature) / (self.xs_e[0]-self.xs[0])
-            d2T = (dT1 - dT2) / (0.5 * (self.xs_e[1] - (-self.xs_e[0] + self.xs[0])))
-            DTupper = d2T * dt / (self.rho_e[0] * self.Cp_e[0])
+        # ... lowermost grid point
+        dT1 = self.k_e[self.ne-1] * (self.bnd_lower_temperature - T_e[self.ne-1]) / (self.xs[self.nx-1]-self.xs_e[self.ne-1])
+        dT2 = k_g[n_kg-1] * (T_e[self.ne-1] - T_e[self.ne-2]) / (self.xs_e[self.ne-1] - self.xs_e[self.ne-2])
+        d2T = (dT1 - dT2) / (0.5 * (self.xs[self.nx-1] + (self.xs[self.nx-1]-self.xs_e[self.ne-1]) - self.xs_e[self.ne-2]))
+        #DTlower = d2T * dt / (self.rho_e[self.ne-1] * self.Cp_e[self.ne-1])
+        DHlower = d2T * dt
+        DHlower = DHlower * (self.xs[self.nx-1]-self.xs[self.nx-2])
 
-            # ... lowermost grid point
-            dT1 = self.k_e[self.ne-1] * (self.bnd_lower_temperature - T_e[self.ne-1]) / (self.xs[self.nx-1]-self.xs_e[self.ne-1])
-            dT2 = k_g[n_kg-1] * (T_e[self.ne-1] - T_e[self.ne-2]) / (self.xs_e[self.ne-1] - self.xs_e[self.ne-2])
-            d2T = (dT1 - dT2) / (0.5 * (self.xs[self.nx-1] + (self.xs[self.nx-1]-self.xs_e[self.ne-1]) - self.xs_e[self.ne-2]))
-            DTlower = d2T * dt / (self.rho_e[self.ne-1] * self.Cp_e[self.ne-1])
-
-            self.T_e[1:(self.ne-1)] = self.T_e[1:(self.ne-1)] + DTinternal
-            self.T_e[0] = self.T_e[0] + DTupper
-            self.T_e[self.ne-1] = self.T_e[self.ne-1] + DTlower
-
-            self.perplexOK = False  # temperature has been changed, perplex calculations out of date
-
-            self.Cp_e_old = np.copy(self.Cp_e)
-            self.rho_e_old = np.copy(self.rho_e)
-            self.updateCpRho()
-            self.updatePressure()
-
-
-            #print self.Cp_e-self.Cp_e_old
-            #print self.T_e-self.T_e_old
-
-            if (max(abs((self.Cp_e-self.Cp_e_old)/self.Cp_e)) > self.config['CP_ITER_THRESHOLD']) or firstIteration:
-                doNewIteration = True
-                firstIteration = False
-                self.T_e[0:self.ne] = self.T_e_old[0:self.ne]
-                niterations = niterations + 1
-
-                # relaxation
-                self.Cp_e = 0.5 * self.Cp_e_old + 0.5 * self.Cp_e
-                self.rho_e = 0.5 * self.rho_e_old + 0.5 * self.rho_e
-
-                newdt = self.maxdt()
-                if dt > self.config['DT_MULTIPLIER_MAX'] * newdt:
-                    # Adjusting Cp/rho has lead to situation where timestep to be used is too close
-                    # to the maximum possible timestep. Adjust timestep and restart iteration.
-                    firstIteration = True
-                    print "\tAdjusting dt from", self.last_dt/SECINYR, "to", newdt
-                    self.last_dt = newdt
-                    dt = self.last_dt
-            else:
-                doNewIteration = False
+        self.addEnthalpy(0,DHupper)
+        for ielem in range(1,self.ne-1):
+            if (DHinternal[ielem-1] != 0.0):
+                self.addEnthalpy(ielem, DHinternal[ielem-1])
+        self.addEnthalpy(self.ne-1,DHlower)
+        #self.T_e[1:(self.ne-1)] = self.T_e[1:(self.ne-1)] + DTinternal
+        #self.T_e[0] = self.T_e[0] + DTupper
+        #self.T_e[self.ne-1] = self.T_e[self.ne-1] + DTlower
 
         self.time = self.time + self.last_dt
-        print "\tIterations needed: ", niterations
         print "\tdt used: ", self.last_dt/SECINYR, "yrs"
 
 
@@ -239,9 +266,14 @@ class Crust:
 
 
 cr = Crust()
+cr.updatePerplex()
+
+#print cr.addEnthalpy(10, 1e12)
 
 while cr.time < 1e5 * SECINYR:
     cr.diffuseT()
+    print cr.perplexResult[-1]['NAMEPHASES']
+    print cr.perplexResult[-1]['WTPHASES']
 
 print cr.T_e
 print cr.Cp_e
