@@ -7,7 +7,7 @@ import matplotlib.cm as cm
 import matplotlib.mlab as mlab
 import matplotlib.pyplot as plt
 
-import scipy
+import scipy.interpolate
 
 DATA_FORMAT_VERSION = 2
 
@@ -17,8 +17,8 @@ var_params = []
 # record_times = [0, 50, 100]  # in Myrs
 # record_depths = [31e3, 95e3, 45e3]
 
-PLOT = 2 
-PLOT_TIME = 3
+PLOT = 1
+PLOT_TIME = 4
 PLOT_DEPTH_BOTTOM = 5
 PLOT_TIME1 = 0
 PLOT_TIME2 = 1
@@ -147,11 +147,13 @@ np_rec_values = np.array(rec_values)
 #dT = (np_rec_values[:,1,1] - np_rec_values[:,0,1])/Tscale
 
 if PLOT == 1:
+    plottitle = "bottom temp change from time zero to t=" + str(record_times[PLOT_TIME])
     Tscale = np_rec_values[:,0,PLOT_DEPTH_BOTTOM]
     dT = np.array(rec_values)[:,PLOT_TIME,PLOT_DEPTH_BOTTOM]/Tscale
     p1 = np.array(rec_params)[:,0]
     p2 = np.array(rec_params)[:,1]
 elif PLOT == 2:
+    plottitle = "temp change from t=" + str(record_times[PLOT_TIME1]) + " to t=" + str(record_times[PLOT_TIME2]) + " at z = " + str(record_depths[PLOT_DEPTH_BELOW_THRUST])
     Tscale = np_rec_values[:,0,PLOT_DEPTH_BOTTOM]
     dT = np.array(rec_values)[:,PLOT_TIME2,PLOT_DEPTH_BELOW_THRUST] - np.array(rec_values)[:,PLOT_TIME1,PLOT_DEPTH_BELOW_THRUST]
     dT = dT / Tscale
@@ -167,6 +169,7 @@ zi = scipy.interpolate.griddata((p1,p2), dT, (xi[None,:],yi[:,None]), method='cu
 plt.figure()
 CS = plt.contourf(xi, yi, zi)
 plt.colorbar()
+plt.title(plottitle)
 plt.scatter(p1,p2,marker='o',c='b',s=5)
 plt.show()
 

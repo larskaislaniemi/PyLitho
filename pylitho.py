@@ -74,15 +74,6 @@ if CONFIG['RESTART']:
     Restart_In_Path = CONFIG['RESTART_INDIR'] + "/" + CONFIG['RESTART_MODELNAME'] + mpi_dir + "/"
 
 
-STATUS['SECINYR'] = 60*60*24*365.25
-SECINYR = STATUS['SECINYR']
-STATUS['NX'] = CONFIG['NX']
-STATUS['Erosion_Speed'] = CONFIG['EROSION_SPEED_M_MA'] / (1e6*SECINYR)
-STATUS['Moho_Depth'] = CONFIG['MOHO_DEPTH_KM'] * 1e3
-STATUS['L'] = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
-STATUS['MaxTime'] = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
-STATUS['MaxRunTime'] = CONFIG['MAXRUNTIME_MA'] * SECINYR * 1e6
-
 if CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 1:
     if CONFIG['KT_RELATION_TYPE'] != 1:
         raise Exception("Incompatible MPI_VARIATION_TYPE and KT_RELATION_TYPE")
@@ -121,7 +112,6 @@ elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 2:
         MPI.Finalize()
 	sys.exit(0)
 
-    
     CONFIG['KT_RELATION_PARAMS'][0] = minval1 + math.floor(mpi_rank/div2)*(maxval1-minval1)/(div1-1.0)
     CONFIG['KT_RELATION_PARAMS'][1] = minval2 + (mpi_rank - div2*math.floor(mpi_rank/div2))*(maxval2-minval2)/(div2-1.0)
 
@@ -131,6 +121,25 @@ elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 2:
     paramfile.close()
 
     print "MPI, #" + str(mpi_rank) + ": params are " + str(CONFIG['KT_RELATION_PARAMS'][0]) + "," + str(CONFIG['KT_RELATION_PARAMS'][1]) + "\n"
+
+elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 10:
+    if CONFIG['KT_RELATION_TYPE'] != 2:
+        raise Exception("Incompatible MPI_VARIATION_TYPE and KT_RELATION_TYPE")
+    if CONFIG['RESTART_POST_MOD'] != 10 and CONFIG['RESTART']:
+        raise Exception("Incompatible RESTART_POST_MOD") 
+    if mpi_size <= 2**5:
+        raise Exception("MPI with one processor?")
+    
+
+
+STATUS['SECINYR'] = 60*60*24*365.25
+SECINYR = STATUS['SECINYR']
+STATUS['NX'] = CONFIG['NX']
+STATUS['Erosion_Speed'] = CONFIG['EROSION_SPEED_M_MA'] / (1e6*SECINYR)
+STATUS['Moho_Depth'] = CONFIG['MOHO_DEPTH_KM'] * 1e3
+STATUS['L'] = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
+STATUS['MaxTime'] = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
+STATUS['MaxRunTime'] = CONFIG['MAXRUNTIME_MA'] * SECINYR * 1e6
 
 # mesh
 xs = np.linspace(STATUS['L'][0], STATUS['L'][1], num=STATUS['NX'])
@@ -222,7 +231,7 @@ pe.initTemp(STATUS, Tini, xs)
 if CONFIG['RHO0_TYPE'] == 0:
     # constant rho0
     rho = 0.0 * xs + 2800
-elif CONFIG['RHO0_TYPE'] == 1:
+elif CONFIG['RHO0_TYPE'] == 1 or CONFIG['RHO0_TYPE'] == 10:
     # different rho0 for crust/mantle
     rho = 0.0 * xs + 2800
     rho[xs > STATUS['Moho_Depth']] = 3300
@@ -236,13 +245,18 @@ if CONFIG['K0_TYPE'] == 0:
 elif CONFIG['K0_TYPE'] == 1:
     K0val = 3.175
     k0 = 0.0 * xs + K0val
+elif CONFIG['K0_TYPE'] == 10:
+    K0val = 0.0 * xs
+    K0val[xs < STATUS['Moho_Depth']] = 3.175
+    K0val[xs >= STATUS['Moho_Depth']] = 4.5
+    k0 = 0.0 * xs + K0val
 else:
     raise Exception("Invalid K0_TYPE")
 
 if CONFIG['C0_TYPE'] == 0:
     #constant c0
     c0 = 0.0 * xs + 800
-elif CONFIG['C0_TYPE'] == 1:
+elif CONFIG['C0_TYPE'] == 1 or CONFIG['C0_TYPE'] == 10:
     #different c0 for crust/mantle
     c0 = 0.0 * xs + 800
     c0[xs >= STATUS['Moho_Depth']] = 700
@@ -254,7 +268,7 @@ else:
 if CONFIG['H0_TYPE'] == 0:
     # no heat prod
     H = 0.0 * xs
-elif CONFIG['H0_TYPE'] == 1:
+elif CONFIG['H0_TYPE'] == 1 or CONFIG['H0_TYPE'] == 10:
     # constant heat prod in crust and mantle
     H = 0.0 * xs
     H[xs < STATUS['Moho_Depth']] = 2.5e-6 # W m^-3
@@ -271,7 +285,7 @@ else:
 if CONFIG['RESTART_POST_MOD'] == 0:
     pass # nothing
 elif CONFIG['RESTART_POST_MOD'] == 1:
-    STATUS['L'][0] -= 30e3  # raise the surface by 30km => overthrust
+    STATUS['L'][0] -= CONFIG['RESTART_POST_MOD_PARAMS'][0]  # raise the surface by 30km => overthrust
     valueArrays = [Tini, H, c0, k0, rho]
     #print Tini
     pe.remesh(STATUS, xs, STATUS['L'], valueArrays, extrapolation=2)

@@ -16,9 +16,9 @@ def initTemp(STATUS, T, x):
     if STATUS['CONFIG']['TINI_TYPE'] == -1:
         pass # T read at restart and no modification needed
     elif STATUS['CONFIG']['TINI_TYPE'] == 0:
-        T[:] = 0.0
+        T[:] = 1.0
     elif STATUS['CONFIG']['TINI_TYPE'] == 1:
-        T[:] = 1519.0 * x[:]/STATUS['L'][1]
+        T[:] = 1519.0 * x[:]/STATUS['L'][1] + 10.0
     elif STATUS['CONFIG']['TINI_TYPE'] == 10:
         # extra 30km overthrust
         idx = x < 30e3
@@ -163,6 +163,15 @@ def getErosionSpeed(STATUS):
             STATUS['Erosion_Speed'] = 0.0
         else:
             STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
+    elif STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 10:
+        # only erode the original overthrust sheet
+	if STATUS['CONFIG']['RESTART_POST_MOD'] != 2:
+	    raise Exception("EROSION_SPEED_TYPE == 10 requires RESTART_POST_MOD == 2")
+
+        if (STATUS['curTime'] - STATUS['ModelStartTime']) > STATUS['CONFIG']['RESTART_POST_MOD_PARAMS'][0] / STATUS['CONFIG']['EROSION_SPEED_M_MA']:
+	    STATUS['Erosion_Speed'] = 0.0
+	else:
+	    STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
 
     else:
         raise Exception("Invalid EROSION_SPEED_TYPE")
