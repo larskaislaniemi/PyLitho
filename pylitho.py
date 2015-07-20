@@ -6,22 +6,33 @@ import pyearth_sub as pe
 import csv
 import os
 import math
+import time
 
 sys.path.insert(0, ".")
 from config import CONFIG
+
+if CONFIG['OUTPUT_FILE']:
+    try:
+        os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'])
+    except Exception as e:
+        pass  # directory probable exists already...
+
+nruns = 0
 
 if CONFIG['MPI']:
     mpi_comm = MPI.COMM_WORLD
     mpi_size = mpi_comm.Get_size()
     mpi_rank = mpi_comm.Get_rank()
-    mpi_file_postfix = "X" + ("{:0>3d}".format(mpi_rank))
-    mpi_dir = "/x" + ("{:0>3d}".format(mpi_rank))
+    mpi_virt_rank = mpi_rank + mpi_size * nruns
+    mpi_file_postfix = "X" + ("{:0>3d}".format(mpi_virt_rank))
+    mpi_dir = "/x" + ("{:0>3d}".format(mpi_virt_rank))
 else:
     mpi_comm = None
     mpi_rank = 0
     mpi_size = 1
     mpi_file_postfix = ""
     mpi_dir = ""
+    mpi_virt_rank = 0
 
 kTfunc = pe.kT
 cTfunc = pe.cT
@@ -32,31 +43,15 @@ STATUS = { 'CONFIG' : CONFIG }
 
 if CONFIG['OUTPUT_FILE']:
     if CONFIG['MPI']:
-        if mpi_rank == 0:
-	    try:
-	        os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'])
-            except Exception as e:
-	        if CONFIG['OUTPUT_OVERWRITE']:
-		    print "Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
-		else:
-		    raise e
-	mpi_comm.Barrier()
-
         try:
-	    os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir)
-	except Exception as e:
-	    if CONFIG['OUTPUT_OVERWRITE']:
-	        print "Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
-	    else:
-	        raise e
-    else:
-        try:
-	    os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'])
+            os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir)
         except Exception as e:
             if CONFIG['OUTPUT_OVERWRITE']:
                 print "Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
             else:
                 raise e
+    else:
+        pass
 
     Output_File_Path = CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir + "/"
 
@@ -83,7 +78,7 @@ if CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 1:
 
     minval = CONFIG['MPI_VARIATION_PARAMS'][0]
     maxval = CONFIG['MPI_VARIATION_PARAMS'][1]
-    CONFIG['KT_RELATION_PARAMS'][0] = minval + mpi_rank*(maxval-minval)/(mpi_size-1)
+    CONFIG['KT_RELATION_PARAMS'][0] = minval + mpi_virt_rank*(maxval-minval)/(mpi_size-1)
     print "MPI, #" + str(mpi_rank) + ": param is " + str(CONFIG['KT_RELATION_PARAMS'][0])
 
     paramfile = open(Output_File_Path + "params", "wb")
@@ -108,9 +103,9 @@ elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 2:
 
     if mpi_rank >= div1*div2:
         print "MPI, #" + str(mpi_rank) + ": Skip\n"
-	mpi_comm.Barrier()
+        mpi_comm.Barrier()
         MPI.Finalize()
-	sys.exit(0)
+        sys.exit(0)
 
     CONFIG['KT_RELATION_PARAMS'][0] = minval1 + math.floor(mpi_rank/div2)*(maxval1-minval1)/(div1-1.0)
     CONFIG['KT_RELATION_PARAMS'][1] = minval2 + (mpi_rank - div2*math.floor(mpi_rank/div2))*(maxval2-minval2)/(div2-1.0)
@@ -122,7 +117,7 @@ elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 2:
 
     print "MPI, #" + str(mpi_rank) + ": params are " + str(CONFIG['KT_RELATION_PARAMS'][0]) + "," + str(CONFIG['KT_RELATION_PARAMS'][1]) + "\n"
 
-elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 10:
+elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 10:
     if CONFIG['KT_RELATION_TYPE'] != 2:
         raise Exception("Incompatible MPI_VARIATION_TYPE and KT_RELATION_TYPE")
     if CONFIG['RESTART_POST_MOD'] != 10 and CONFIG['RESTART']:
@@ -163,18 +158,18 @@ if CONFIG['RESTART']:
     for row in csvmetareader:
         if firstRow:
             firstRow = False
-	    mpirow = True
+            mpirow = True
             if int(row[0]) != DATA_FORMAT_VERSION:
                 raise Exception("Incompatible data format version in restart")
             else:
                 continue
         elif mpirow:
-	    mpirow = False
-	    if CONFIG['MPI']:
-	        if int(row[0]) != mpi_rank:
-		    raise Exception("Rank mismatch between running process and restart meta file")
-		else:
-		    continue
+            mpirow = False
+            if CONFIG['MPI']:
+                if int(row[0]) != mpi_rank:
+                    raise Exception("Rank mismatch between running process and restart meta file")
+                else:
+                    continue
 
         if not row[0].isdigit():
             continue
@@ -333,11 +328,11 @@ while (STATUS['curTime'] < STATUS['MaxTime']) and (STATUS['curTime']-STATUS['Mod
 
     while diffsChange > CONFIG['DIFFSCHANGE_ACCURACY']:
         iterations += 1
-	if math.floor(math.log10(iterations)) > ndtadjust:
-	    ndtadjust = ndtadjust + 1
-	    dtadjust = dtadjust / 2.0
-	    if dtadjust < 0.1:
-	        print "NB! #" + str(mpi_rank) + ": dtadjust = " + str(dtadjust) + ", it = " + str(it) + "\n"
+        if math.floor(math.log10(iterations)) > ndtadjust:
+            ndtadjust = ndtadjust + 1
+            dtadjust = dtadjust / 2.0
+            if dtadjust < 0.1:
+                print "NB! #" + str(mpi_rank) + ": dtadjust = " + str(dtadjust) + ", it = " + str(it) + "\n"
 
         dt = dtadjust * CONFIG['TSTEP_MULTI'] * pe.maxdt(k, rho, cp, xs)
         pe.diffstep(STATUS, T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H)
@@ -347,11 +342,11 @@ while (STATUS['curTime'] < STATUS['MaxTime']) and (STATUS['curTime']-STATUS['Mod
         diffsOld = k / (cp * rho)
         cp = cTfunc(CONFIG['CT_RELATION_TYPE'], c0, CONFIG['CT_RELATION_PARAMS'], new_T)
         k = kTfunc(CONFIG['KT_RELATION_TYPE'], k0, CONFIG['KT_RELATION_PARAMS'], new_T)
-	idx = k <= 0
-	if sum(idx) > 0:
-	    #k[idx] = kold[idx]
-	    #print "#" + str(mpi_rank) + ", k == 0 at " + str(np.where(idx)) + ", it = " + str(it)
-	    raise Exception("#" + str(mpi_rank) + ", k == 0 at " + str(np.where(idx)) + ", it = " + str(it) + ", new_T = " + str(new_T[idx])) 
+        idx = k <= 0
+        if sum(idx) > 0:
+            #k[idx] = kold[idx]
+            #print "#" + str(mpi_rank) + ", k == 0 at " + str(np.where(idx)) + ", it = " + str(it)
+            raise Exception("#" + str(mpi_rank) + ", k == 0 at " + str(np.where(idx)) + ", it = " + str(it) + ", new_T = " + str(new_T[idx])) 
 
         diffsChange = max(abs(k/(cp*rho)-diffsOld))
 
