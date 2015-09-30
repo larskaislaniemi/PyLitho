@@ -7,7 +7,7 @@ CONFIG = {
     'MPI' : True,
     'MPI_VARIATION_TYPE' : 1,
     'MPI_VARIATION_PARAMS' : np.array((5e-4,15e-4)),
-    'MPI_VIRT_PROCS' : 20,
+    'MPI_VIRT_PROCS' : 60,
 
 
     'OUTPUT_FILE' : True,

@@ -53,7 +53,7 @@ while nruns >= 0:
                 os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir)
             except Exception as e:
                 if CONFIG['OUTPUT_OVERWRITE']:
-                    print "Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
+                    print str(mpi_virt_rank) + "> Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
                 else:
                     raise e
         else:
@@ -63,7 +63,7 @@ while nruns >= 0:
 
         csvmetafile = open(Output_File_Path + "meta", "wb")
         csvmetafile.write(str(DATA_FORMAT_VERSION)+"\n")
-        csvmetafile.write(str(mpi_rank)+"\n")
+        csvmetafile.write(str(mpi_virt_rank)+"\n")
         csvmetafile.close()
 
         csvmetafile = open(Output_File_Path + "meta", "ab")
@@ -74,6 +74,9 @@ while nruns >= 0:
     if CONFIG['RESTART']:
         Restart_In_Path = CONFIG['RESTART_INDIR'] + "/" + CONFIG['RESTART_MODELNAME'] + mpi_dir + "/"
 
+
+
+    # Vary the parameters if MPI used ...
 
     if CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 1:
         if CONFIG['KT_RELATION_TYPE'] != 1:
@@ -124,7 +127,55 @@ while nruns >= 0:
         paramfile.close()
 
         print "MPI, #" + str(mpi_rank) + ", virt#" + str(mpi_virt_rank) + ": params are " + str(CONFIG['KT_RELATION_PARAMS'][0]) + "," + str(CONFIG['KT_RELATION_PARAMS'][1]) + "\n"
+    elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 20:
+        if mpi_size <= 1:
+            raise Exception("MPI with one processor?")
 
+        hLmin = CONFIG['MPI_VARIATION_PARAMS'][0]
+        hLmax = CONFIG['MPI_VARIATION_PARAMS'][1]
+        hOmin = CONFIG['MPI_VARIATION_PARAMS'][2]
+        hOmax = CONFIG['MPI_VARIATION_PARAMS'][3]
+        vEmin = CONFIG['MPI_VARIATION_PARAMS'][4]
+        vEmax = CONFIG['MPI_VARIATION_PARAMS'][5]
+
+        div1 = math.floor((CONFIG['MPI_VIRT_PROCS'])**(1./3.))
+        div2 = math.sqrt(math.floor(CONFIG['MPI_VIRT_PROCS'] / div1))
+        div3 = math.floor(CONFIG['MPI_VIRT_PROCS']/(div1*div2))
+
+        if mpi_virt_rank >= div1*div2*div3:
+            # I'm an unused processor. Poor me.
+            print "?? MPI, #" + str(mpi_rank) + ", virt#" + str(mpi_virt_rank) + ": Skip\n"
+            mpi_comm.Barrier()
+            MPI.Finalize()
+            sys.exit(0)
+
+        pos3 = math.floor(mpi_virt_rank / (div1*div2))
+        pos2 = math.floor((mpi_virt_rank - pos3 * div1 * div2) / div1)
+        pos1 = mpi_virt_rank % div1
+
+        if CONFIG['RESTART_POST_MOD'] == 1:
+            CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
+            CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
+            CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['L_KM'][0]
+            CONFIG['EROSION_SPEED_M_MA'] = vEmin + pos3 * (vEmax-vEmin) / (div3-1.0)
+            CONFIG['MAX_TIME_TO_ERODE_MA'] = CONFIG['RESTART_POST_MOD_PARAMS'][0] / CONFIG['EROSION_SPEED_M_MA']
+        elif CONFIG['RESTART_POST_MOD'] == 0:
+            CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
+            CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
+            CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['L_KM'][0]
+            CONFIG['EROSION_SPEED_M_MA'] = 0.0
+            CONFIG['MAX_TIME_TO_ERODE_MA'] = 0.0
+        else:
+            raise Exception("!! RESTART_POST_MOD has to be zero or one for this MPI type")
+
+        paramfile = open(Output_File_Path + "params", "wb")
+        paramfile.write(str(CONFIG['RESTART_POST_MOD_PARAMS'][0]) + "\n")
+        paramfile.write(str(CONFIG['L_KM']) + "\n")
+        paramfile.write(str(CONFIG['EROSION_SPEED_M_MA']) + "\n")
+        paramfile.close()
+        
     elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 10:
         if CONFIG['KT_RELATION_TYPE'] != 2:
             raise Exception("Incompatible MPI_VARIATION_TYPE and KT_RELATION_TYPE")
@@ -143,6 +194,9 @@ while nruns >= 0:
     STATUS['L'] = np.array((CONFIG['L_KM'][0]*1e3, CONFIG['L_KM'][1]*1e3))
     STATUS['MaxTime'] = CONFIG['MAXTIME_MA'] * SECINYR * 1e6
     STATUS['MaxRunTime'] = CONFIG['MAXRUNTIME_MA'] * SECINYR * 1e6
+    STATUS['MaxTimeToErode'] = CONFIG['MAX_TIME_TO_ERODE_MA'] * SECINYR * 1e6
+
+
 
     # mesh
     xs = np.linspace(STATUS['L'][0], STATUS['L'][1], num=STATUS['NX'])
@@ -163,35 +217,43 @@ while nruns >= 0:
         firstRow = True
         rowfound = False
         mpirow = False
+        prevtime = 0.0
         for row in csvmetareader:
             if firstRow:
                 firstRow = False
                 mpirow = True
                 if int(row[0]) != DATA_FORMAT_VERSION:
-                    raise Exception("Incompatible data format version in restart")
+                    raise Exception(str(mpi_virt_rank) + "> Incompatible data format version in restart")
                 else:
                     continue
             elif mpirow:
                 mpirow = False
                 if CONFIG['MPI']:
                     if int(row[0]) != mpi_virt_rank:
-                        raise Exception("Rank mismatch between running process (mpi_virt_rank) and restart meta file")
+                        raise Exception(str(mpi_virt_rank) + "> Rank mismatch between running process (mpi_virt_rank) and restart meta file")
                     else:
                         continue
 
             if not row[0].isdigit():
                 continue
-            #print row[0], CONFIG['RESTART_TSTEP']
+
             if int(row[0]) == CONFIG['RESTART_TSTEP']:
                 rowfound = True
                 STATUS['curTime'] = float(row[1]) * SECINYR * 1e6
+                STATUS['Restart_Tstep'] = CONFIG['RESTART_TSTEP']
+            elif row[1] > CONFIG['RESTART_TIME_MA'] and prevtime < CONFIG['RESTART_TIME_MA']:
+                rowfound = True
+                STATUS['Restart_Tstep'] = int(row[0])
+                STATUS['curTime'] = float(row[1]) * SECINYR * 1e6
+
+            prevtime = float(row[1])
 
         if not rowfound:
-            raise Exception("Error reading metadata file: tstep " + str(CONFIG['RESTART_TSTEP']) + " not found.")
+            raise Exception(str(mpi_virt_rank) + "> Error reading metadata file: tstep " + str(STATUS['Restart_Tstep']) + " not found, time " + CONFIG['RESTART_TIME_MA'] + " not found.")
 
         rcsvmetafile.close()
 
-        rcsvfile = open(Restart_In_Path + "nodes." + str(CONFIG['RESTART_TSTEP']), "rb")
+        rcsvfile = open(Restart_In_Path + "nodes." + str(STATUS['Restart_Tstep']), "rb")
         csvreader = csv.reader(rcsvfile, delimiter=",", quotechar='"')
 
         skipFirst = True
@@ -213,7 +275,7 @@ while nruns >= 0:
             if xsin[0] != xs[0] or xsin[-1] != xs[-1]:
                 #print xsin
                 #print xs
-                raise Exception("Changes in extent during restart not allowed.")
+                raise Exception(str(mpi_virt_rank) + "> Changes in extent during restart not allowed.")
             else:
                 # match grid points, result must follow gridding configured in config file
                 valueArrays = [Tin]
@@ -329,7 +391,7 @@ while nruns >= 0:
         k = kTfunc(CONFIG['KT_RELATION_TYPE'], k0, CONFIG['KT_RELATION_PARAMS'], T)
         idx = k <= 0
         if sum(idx) > 0:
-            raise Exception("k == 0 at " + str(np.where(idx)))
+            raise Exception(str(mpi_virt_rank) + "> k == 0 at " + str(np.where(idx)))
 
         dtadjust = 1.0
         ndtadjust = 0
