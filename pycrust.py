@@ -15,10 +15,12 @@ class Crust:
 #                                         # (Cp_new - Cp_old)/Cp_new has to be smaller than this
             'T_ITER_THRESHOLD' : 1e-1,   # converge criteria for dT=f(dH) iteration (Kelvins)
             'GRID_NX' : 30,     # num of grid points (= num of elements + 1)
-            'GRID_H' : 5000.0,  # height of the model, meters
+            'GRID_H' : 5000.0,  # original height of the model, meters
+            'GRID_STATIC_POINT' : 0,   # which grid point is kept static (x doesn't change) during volume changes
             'BND_UPPER_PRESSURE' : 20000.0,           # pressure at the upper boundary, bar
             'BND_UPPER_TEMPERATURE' : 273.0 + 1000.0, # temperature at the upper boundary, Kelvin
             'BND_LOWER_TEMPERATURE' : 273.0 + 1125.0, # temperature at the lower boundary, Kelvin
+
         }
 
         self.components = self.perplex.components
@@ -66,27 +68,40 @@ class Crust:
         #self.T = self.getIniField("temp", self.xs)               # K # seems not to be needed....
 
         # generate initial info by perplex
-        self.updatePerplex()
+        self.updatePerplex(initial=True)
+
+        # update density and Cp fields from PerpleX results
         self.updateCpRho()
 
         # generate the mass information
-        for i in range(self.ne):
-            self.mass_e = self.rho_e * (self.xs[i+1]-self.xs[i])
+        self.mass_e = self.rho_e * (self.xs[1:self.nx] - self.xs[0:(self.nx-1)])
+        print self.mass_e
+
+        # update grid according to new density (=volume) values from PerpleX
+        self.updateGridToRho()
+
+        self.updatePressure()
 
     def updatePressure(self):
-        for i in range(self.ne):
-            self.pres[i] = self.bnd_upper_pressure + sum(self.rho_e[0:i] * self.accel_g * (self.xs[i+1]-self.xs[i])) * 1e-5
+        self.pres[:] = self.bnd_upper_pressure
+        self.pres_e[:] = self.bnd_upper_pressure
+        for i in range(1,self.ne):
+            self.pres[i] += sum(self.mass_e[0:i]) * self.accel_g * 1e-5
             self.pres_e[i] = self.pres[i]   # simplification: the pressure of the element is the pressure
                                             # at the upper surface of the element
 
-    def updatePerplex(self, ielem=-1):
-        #self.updatePressure()
+    def updatePerplex(self, ielem=-1, initial=False):
+        if ielem >= 0 and initial:
+            raise Exception("ielem >=0 and initial == True in updatePerplex()")
         if ielem < 0:
             self.perplexResult = []
+        if not initial:
+            self.updatePressure()
         for i in range(self.ne):
-            self.pres[i] = self.bnd_upper_pressure + sum(self.rho_e[0:i] * self.accel_g * (self.xs[i+1]-self.xs[i])) * 1e-5
-            self.pres_e[i] = self.pres[i]
             if ielem < 0:
+                if initial:
+                    self.updatePressure() # For initial call to this function, pressure needs to be updated
+                                          # after each update of an element
                 self.perplexResult.append(self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i]))
             elif ielem == i:
                 self.perplexResult[ielem] = self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i])
@@ -98,6 +113,16 @@ class Crust:
         for i in range(self.ne):
             self.rho_e[i] = self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['rho']]
             self.Cp_e[i] = G2KG * self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['N']]
+
+    def updateGridToRho(self):
+        volumes = self.mass_e / self.rho_e  # in 1D this is directly dx
+        new_x = self.xs[:] * 0.0
+        for i in range(0,self.config['GRID_STATIC_POINT']):
+            new_x[i] = self.xs[self.config['GRID_STATIC_POINT']] - sum(volumes[i:self.config['GRID_STATIC_POINT']])
+        for i in range(self.config['GRID_STATIC_POINT'],self.nx):
+            new_x[i] = self.xs[self.config['GRID_STATIC_POINT']] + sum(volumes[self.config['GRID_STATIC_POINT']:i])
+        self.xs[:] = new_x[:]
+        print " * updateGridToRho(): New extents are ", new_x[0], new_x[-1]
 
     def maxdt(self):
         # return maximum time step for diffusion,
@@ -161,8 +186,6 @@ class Crust:
     def diffuseT(self, dt = 0.0):
         self.timestep = self.timestep + 1
         print " * Diffusion, time step", self.timestep, ", time = ", (self.time / SECINYR), " yrs"
-        self.updateCpRho()
-        self.updatePressure()
 
         T_e = self.T_e
 
@@ -272,8 +295,12 @@ cr.updatePerplex()
 
 while cr.time < 1e5 * SECINYR:
     cr.diffuseT()
+    cr.updatePerplex()
+    cr.updateCpRho()
+    cr.updateGridToRho()
+    cr.updatePressure()
     print cr.perplexResult[-1]['NAMEPHASES']
-    print cr.perplexResult[-1]['WTPHASES']
+    #print cr.perplexResult[-1]['WTPHASES']
 
 print cr.T_e
 print cr.Cp_e
