@@ -134,7 +134,9 @@ def diffstep(STATUS, T, new_T, xs, k, dt, Tsurf, q0, rho, cp, H):
     #    new_T[ix] = new_T[ix] + H[ix] * dt / (rho[ix] * cp[ix])
     
     # lower bnd
-    if STATUS['CONFIG']['BND_BOT_TYPE'] == 1:
+    if STATUS['CONFIG']['BND_BOT_TYPE'] == 0:
+        new_T[NX-1] = STATUS['CONFIG']['BND_BOT_TEMP']
+    elif STATUS['CONFIG']['BND_BOT_TYPE'] == 1:
         new_T[NX-1] = q0 * dx[NX-2] / khalf[NX-2] + T[NX-2]
     elif STATUS['CONFIG']['BND_BOT_TYPE'] == 9:
         TL = 1250.0
@@ -159,11 +161,11 @@ def getErosionSpeed(STATUS):
         STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
 
     elif STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 1:
-        if (STATUS['curTime'] - STATUS['ModelStartTime']) / (1e6 * STATUS['SECINYR']) > 300:
+        if (STATUS['curTime'] - STATUS['ModelStartTime']) > STATUS['MaxTimeToErode']:
             STATUS['Erosion_Speed'] = 0.0
         else:
             STATUS['Erosion_Speed'] = STATUS['CONFIG']['EROSION_SPEED_M_MA'] / (1e6*STATUS['SECINYR'])
-    elif STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 10:
+    elif STATUS['CONFIG']['EROSION_SPEED_TYPE'] == 10:
         # only erode the original overthrust sheet
 	if STATUS['CONFIG']['RESTART_POST_MOD'] != 2:
 	    raise Exception("EROSION_SPEED_TYPE == 10 requires RESTART_POST_MOD == 2")
@@ -225,7 +227,8 @@ def remesh(STATUS, curxs, newExt, arrays, extrapolation=0):
 
     addGridPoints = NX - len(curxs)
     if addGridPoints != 0:
-        print "remesh(): Adding " + str(addGridPoints) + " grid points"
+        #print "remesh(): Adding " + str(addGridPoints) + " grid points"
+        pass
 
     # apply the new grid to the value arrays
     for i in range(len(arrays)):

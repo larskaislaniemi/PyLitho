@@ -1,316 +1,265 @@
 import numpy as np
 import PrplxWrap
+import sys
+import pprint as pp
+import matplotlib.pyplot as plt
+import interpolate as ip
+import pylitho_exceptions as pyle
+import copy
+import Grid
+import Crust
+from PhysicalConstants import *
 
-G2KG = 1000.0
-SECINYR = 60.0*60.0*24.0*365.25
-
-class Crust:
-    perplex = PrplxWrap.perplex("in26klb_new")
-
-    def __init__(self):
-        self.config = {
-            'DT_MULTIPLIER' : 0.5,
-#            'DT_MULTIPLIER_MAX' : 0.9,
-#            'CP_ITER_THRESHOLD' : 1e-4,  # converge criteria for Cp iteration,
-#                                         # (Cp_new - Cp_old)/Cp_new has to be smaller than this
-            'T_ITER_THRESHOLD' : 1e-1,   # converge criteria for dT=f(dH) iteration (Kelvins)
-            'GRID_NX' : 30,     # num of grid points (= num of elements + 1)
-            'GRID_H' : 5000.0,  # original height of the model, meters
-            'GRID_STATIC_POINT' : 0,   # which grid point is kept static (x doesn't change) during volume changes
-            'BND_UPPER_PRESSURE' : 20000.0,           # pressure at the upper boundary, bar
-            'BND_UPPER_TEMPERATURE' : 273.0 + 1000.0, # temperature at the upper boundary, Kelvin
-            'BND_LOWER_TEMPERATURE' : 273.0 + 1125.0, # temperature at the lower boundary, Kelvin
-
-        }
-
-        self.components = self.perplex.components
-        self.ncomponents = len(self.components)
-
-        self.time = 0.0    # model time
-        self.last_dt = 0.0 # latest time step taken
-        self.timestep = 0  # counter for time steps
-
-        # (initial) grid specification
-        self.nx = self.config['GRID_NX']  # num of grid points
-        self.ne = self.nx-1               # num of elements
-        self.xs = np.linspace(0.0,self.config['GRID_H'],self.nx)        # xs at grid points
-        self.xs_e = 0.5 * (self.xs[0:self.nx-1] + self.xs[1:self.nx])   # xs at elements
-
-        # boundary condition stuff
-        self.bnd_upper_pressure = self.config['BND_UPPER_PRESSURE']
-        self.bnd_upper_temperature = self.config['BND_UPPER_TEMPERATURE']
-        self.bnd_lower_temperature = self.config['BND_LOWER_TEMPERATURE']
-
-        # latest perplex results
-        self.perplexResult = None
-
-        # physical constants
-        self.accel_g = 9.81
-
-        # flag to indicate whether perplex data calculated
-        # for the grid points is up to date
-        self.perplexOK = False
-
-        # (initial) field specification
-        # "_e" refers to elements (grid points in the middle of elements);
-        # without '_e': the main grid points, defining (e.g.) upper and lower boundaries
-        # of the model and placed also in between lithological units.
-        # Num of main grid points (self.nx) = num of element grid points (self.ne) + 1
-        # Most of the data is stored in the elements.
-        self.T_e = self.getIniField("temp", self.xs_e)            # K
-        self.C_e = self.getIniField("compo", self.xs_e)           # wt% (0..1)
-        self.k_e = self.getIniField("conductivity", self.xs_e)    #
-        self.Cp_e = self.getIniField("heatcapacity", self.xs_e)   # J/kgK
-        self.rho_e = self.getIniField("density", self.xs_e)       # kg/m3
-        self.pres_e = self.getIniField("pressure", self.xs_e)     # bar
-        self.pres = self.getIniField("pressure", self.xs)
-        self.mass_e = self.getIniField("mass", self.xs_e)         # kg
-        #self.T = self.getIniField("temp", self.xs)               # K # seems not to be needed....
-
-        # generate initial info by perplex
-        self.updatePerplex(initial=True)
-
-        # update density and Cp fields from PerpleX results
-        self.updateCpRho()
-
-        # generate the mass information
-        self.mass_e = self.rho_e * (self.xs[1:self.nx] - self.xs[0:(self.nx-1)])
-        print self.mass_e
-
-        # update grid according to new density (=volume) values from PerpleX
-        self.updateGridToRho()
-
-        self.updatePressure()
-
-    def updatePressure(self):
-        self.pres[:] = self.bnd_upper_pressure
-        self.pres_e[:] = self.bnd_upper_pressure
-        for i in range(1,self.ne):
-            self.pres[i] += sum(self.mass_e[0:i]) * self.accel_g * 1e-5
-            self.pres_e[i] = self.pres[i]   # simplification: the pressure of the element is the pressure
-                                            # at the upper surface of the element
-
-    def updatePerplex(self, ielem=-1, initial=False):
-        if ielem >= 0 and initial:
-            raise Exception("ielem >=0 and initial == True in updatePerplex()")
-        if ielem < 0:
-            self.perplexResult = []
-        if not initial:
-            self.updatePressure()
-        for i in range(self.ne):
-            if ielem < 0:
-                if initial:
-                    self.updatePressure() # For initial call to this function, pressure needs to be updated
-                                          # after each update of an element
-                self.perplexResult.append(self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i]))
-            elif ielem == i:
-                self.perplexResult[ielem] = self.perplex.phaseq(self.pres_e[i], self.T_e[i], self.C_e[i])
-        self.perplexOK = True
-
-    def updateCpRho(self):
-        if not self.perplexOK:
-            self.updatePerplex()
-        for i in range(self.ne):
-            self.rho_e[i] = self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['rho']]
-            self.Cp_e[i] = G2KG * self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[i]['SYSPROP'][self.perplex.syspropnum['N']]
-
-    def updateGridToRho(self):
-        volumes = self.mass_e / self.rho_e  # in 1D this is directly dx
-        new_x = self.xs[:] * 0.0
-        for i in range(0,self.config['GRID_STATIC_POINT']):
-            new_x[i] = self.xs[self.config['GRID_STATIC_POINT']] - sum(volumes[i:self.config['GRID_STATIC_POINT']])
-        for i in range(self.config['GRID_STATIC_POINT'],self.nx):
-            new_x[i] = self.xs[self.config['GRID_STATIC_POINT']] + sum(volumes[self.config['GRID_STATIC_POINT']:i])
-        self.xs[:] = new_x[:]
-        print " * updateGridToRho(): New extents are ", new_x[0], new_x[-1]
-
-    def maxdt(self):
-        # return maximum time step for diffusion,
-        # assume that information for k, rho and Cp is up-to-date
-        dx = self.xs[1:self.nx] - self.xs[0:(self.nx-1)]
-        diff = self.k_e / (self.rho_e * self.Cp_e)
-        maxdt = min(0.5 * dx * dx / diff)
-        return maxdt
-
-    def addEnthalpy(self, ielem, dH):
-        # input:
-        #  ielem: element to which the enthalpy is added
-        #  dH:    amount of added enthalpy [J]
-
-        if not self.perplexOK:
-            self.updatePerplex()  # to make sure pressure field is OK.
-                                  # probably unnecessary.
-
-        doNewIteration = True
-
-        # dH is given in Joules (total), transform to J/kg
-        dH = dH / (self.rho_e[ielem] * (self.xs[ielem+1] - self.xs[ielem]))
-
-        Cp0 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
-        T0 = self.T_e[ielem]
-        H0 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['H']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
-        Tini = T0
-        Hini = H0
-
-        niter = 0
-        stepDecr = 1e10   # decrease in solution between successive steps
-        stepMultip = 1.0
-
-        while doNewIteration:
-            T1 = T0 - stepMultip * (H0-Hini-dH) / Cp0
-            #print T0, "->", T1
-            #print "-(H0-Hini-dH) / Cp0 =", -(H0-Hini-dH)/Cp0, ", H0 =", H0, ", stepMultip =", stepMultip
-            self.T_e[ielem] = T1
-            self.updatePerplex(ielem)
-            H1 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['H']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
-            Cp1 = G2KG * self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['Cp']] / self.perplexResult[ielem]['SYSPROP'][self.perplex.syspropnum['N']]
-
-            if abs(T1-T0) < self.config['T_ITER_THRESHOLD']:
-                doNewIteration = False
-            else:
-                if abs(T1-T0) >= stepDecr:
-                    # halve the step
-                    stepMultip = stepMultip / 2.0
-                stepDecr = abs(T1-T0)
-                niter = niter + 1
-                T0 = T1
-                H0 = H1
-                Cp0 = Cp1
-
-        #if niter > 0:
-        #    print "Needed", niter, "iterations"
-
-        return T1-Tini
-
-
-    def diffuseT(self, dt = 0.0):
-        self.timestep = self.timestep + 1
-        print " * Diffusion, time step", self.timestep, ", time = ", (self.time / SECINYR), " yrs"
-
-        T_e = self.T_e
-
-        if dt == 0:
-            # estimate largest time step, use a fraction of that
-            dt = self.config['DT_MULTIPLIER'] * self.maxdt()
-            self.last_dt = dt
-
-        # calculate conductivity for main grid points by averaging from elements
-        k_g =       0.5 * (self.xs[2:self.nx] - self.xs[1:(self.nx-1)]) * self.k_e[1:self.ne]
-        k_g = k_g + 0.5 * (self.xs[1:(self.nx-1)] - self.xs[0:(self.nx-2)]) * self.k_e[0:(self.ne-1)]
-        k_g = k_g / (0.5 * (self.xs[2:self.nx] - self.xs[0:(self.nx-2)]))
-        n_kg = k_g.size
-
-        ## heat diffusion for
-        # ... internal grid points.
-        # At elemental grid points we define T, rho, Cp, k, d2T/dz2;
-        # at main grid points we define dT/dz.
-        dT1 = k_g[1:n_kg]     * (T_e[2:self.ne]     - T_e[1:(self.ne-1)]) / (self.xs_e[2:self.ne]     - self.xs_e[1:(self.ne-1)])
-        dT2 = k_g[0:(n_kg-1)] * (T_e[1:(self.ne-1)] - T_e[0:(self.ne-2)]) / (self.xs_e[1:(self.ne-1)] - self.xs_e[0:(self.ne-2)])
-        d2T = (dT1 - dT2) / (0.5 * (self.xs_e[2:self.ne] - self.xs_e[0:(self.ne-2)]))
-        #DTinternal = d2T * dt / (self.rho_e[1:(self.ne-1)] * self.Cp_e[1:(self.ne-1)])
-        DHinternal = d2T * dt   # J/m3
-        DHinternal = DHinternal * (self.xs[2:(self.nx-1)] - self.xs[1:(self.nx-2)])
-
-        # ... uppermost grid point
-        dT1 = k_g[0]     * (T_e[1]     - T_e[0]) / (self.xs_e[1]     - self.xs_e[0])
-        dT2 = self.k_e[0] * (T_e[0] - self.bnd_upper_temperature) / (self.xs_e[0]-self.xs[0])
-        d2T = (dT1 - dT2) / (0.5 * (self.xs_e[1] - (-self.xs_e[0] + self.xs[0])))
-        #DTupper = d2T * dt / (self.rho_e[0] * self.Cp_e[0])
-        DHupper = d2T * dt
-        DHupper = DHupper * (self.xs[1] - self.xs[0])
-
-        # ... lowermost grid point
-        dT1 = self.k_e[self.ne-1] * (self.bnd_lower_temperature - T_e[self.ne-1]) / (self.xs[self.nx-1]-self.xs_e[self.ne-1])
-        dT2 = k_g[n_kg-1] * (T_e[self.ne-1] - T_e[self.ne-2]) / (self.xs_e[self.ne-1] - self.xs_e[self.ne-2])
-        d2T = (dT1 - dT2) / (0.5 * (self.xs[self.nx-1] + (self.xs[self.nx-1]-self.xs_e[self.ne-1]) - self.xs_e[self.ne-2]))
-        #DTlower = d2T * dt / (self.rho_e[self.ne-1] * self.Cp_e[self.ne-1])
-        DHlower = d2T * dt
-        DHlower = DHlower * (self.xs[self.nx-1]-self.xs[self.nx-2])
-
-        self.addEnthalpy(0,DHupper)
-        for ielem in range(1,self.ne-1):
-            if (DHinternal[ielem-1] != 0.0):
-                self.addEnthalpy(ielem, DHinternal[ielem-1])
-        self.addEnthalpy(self.ne-1,DHlower)
-        #self.T_e[1:(self.ne-1)] = self.T_e[1:(self.ne-1)] + DTinternal
-        #self.T_e[0] = self.T_e[0] + DTupper
-        #self.T_e[self.ne-1] = self.T_e[self.ne-1] + DTlower
-
-        self.time = self.time + self.last_dt
-        print "\tdt used: ", self.last_dt/SECINYR, "yrs"
-
-
-    def getIniField(self, field, xs, fieldType = 0):
-        if field == "temp":
-            if fieldType == 0:
-                retField = xs * 0.0 + 1000.0 + 273.0
-            else:
-                raise Exception("Invalid fieldType")
-        elif field == "compo":
-            if fieldType == 0:
-                retField = []
-                for i in range(len(xs)):
-                    retField.append([[]] * self.ncomponents)
-                    retField[i][0] = 0.4448
-                    retField[i][1] = 0.0359
-                    retField[i][2] = 0.0810
-                    retField[i][3] = 0.3922
-                    retField[i][4] = 0.0344
-                    retField[i][5] = 0.0030
-            else:
-                raise Exception("Invalid fieldType")
-        elif field == "conductivity":
-            if fieldType == 0:
-                retField = 0.0 * xs + 3.5
-            else:
-                raise Exception("Invalid fieldType")
-        elif field == "heatcapacity":
-            retField = 0.0 * xs
-            # (this is a dummy, need perplex to do properly)
-        elif field == "mass":
-            retField = 0.0 * xs
-            # (this is a dummy, need perplex to do properly)
-        elif field == "density":
-            retField = 0.0 * xs
-            # (this is a dummy, need perplex to do properly)
-        elif field == "pressure":
-            retField = 0.0 * xs
-            # (this is a dummy, need perplex to do properly)
-        else:
-            raise Exception("Invalid field")
-
-        return retField
-
-
-
+# reload classes that might have been modified during developing
+# and interactive sessions like IPython
+reload(ip)
+reload(PrplxWrap)
+reload(pyle)
+reload(Grid)
+reload(Crust)
 
 
 ### MAIN PROGRAM:
 
+config = { 
+    'DT_MULTIPLIER' : 0.5,
+    'T_ITER_THRESHOLD' : 1e-1,   # converge criteria for dT=f(dH) iteration (Kelvins)
+    'GRID_NX' : 50,     # num of grid points (= num of elements + 1)
+    'GRID_H' : 10000.0,  # original height of the model, meters
+    'GRID_STATIC_POINT' : 0,   # which grid point is kept static (x doesn't change) during volume changes
+    'BND_UPPER_PRESSURE' : 1370.0,           # pressure at the upper boundary, bar
+    'BND_UPPER_TEMPERATURE' : 273.0 + 200.0, # temperature at the upper boundary, Kelvin
+    'BND_LOWER_TEMPERATURE' : 273.0 + 600.0, # temperature at the lower boundary, Kelvin
+    'RECORD_TYPE' : 1,
+#    'EVENT_TYPE' : [2, 3], 
+#    'EVENT_TIMING' : [1e3 * SECINYR, 500e3 * SECINYR],
+    'EVENT_TYPE' : [1],
+    'EVENT_TIMING' : [1e3 * SECINYR],
+    'INI_FIELD_TYPE' : 1,
+}
 
-cr = Crust()
+
+cr = Crust.Crust("crustmod", config=config)
 cr.updatePerplex()
+cr.updateCpRho()
+cr.updateGridToRho()
+cr.updatePressure()
+cr.initRecord()
 
-#print cr.addEnthalpy(10, 1e12)
+eventDone = [False] * len(cr.config['EVENT_TYPE'])
 
-while cr.time < 1e5 * SECINYR:
+while cr.time < 1e6 *SECINYR:
     cr.diffuseT()
-    cr.updatePerplex()
     cr.updateCpRho()
     cr.updateGridToRho()
     cr.updatePressure()
-    print cr.perplexResult[-1]['NAMEPHASES']
-    #print cr.perplexResult[-1]['WTPHASES']
+    cr.doRecord()
 
-print cr.T_e
-print cr.Cp_e
-print cr.rho_e
+    plt.plot(cr.T_e, -cr.xs_e)
+    plt.hold(True)
+    
+    for ievent in range(len(eventDone)):
+        if (not eventDone[ievent]) and cr.time > cr.config['EVENT_TIMING'][ievent]:
+            eventType = cr.config['EVENT_TYPE'][ievent]
+            print " *** Event ", ievent, ", type ", eventType
+            eventDone[ievent] = True
+            if eventType == 1:
+                ne_add = 3  # num of elems to add (and of grid points to add)
+                h_add = 500.  # total length to add
+                loc_add = int(cr.nx/2) # grid point to add to 
+                print "loc_add:", loc_add
+                new_xs = np.zeros(cr.nx+ne_add)
+                print new_xs
+                new_xs[0:loc_add] = cr.xs[0:loc_add]
+                new_xs[(loc_add+ne_add):(cr.nx+ne_add)] = cr.xs[loc_add:cr.nx] + h_add
+                new_xs[loc_add:(loc_add+ne_add)] = cr.xs[loc_add] + np.arange(ne_add) * h_add / float(ne_add)
+                new_nx = len(new_xs)
+                new_xs_e = (new_xs[1:new_nx]+new_xs[0:(new_nx-1)]) * 0.5
+                new_ne = len(new_xs_e)
+
+                new_T_val = 1200. # K
+                cr.T_e = np.resize(cr.T_e, new_ne)
+                print loc_add, ne_add, cr.ne, new_ne
+                cr.T_e[(loc_add+ne_add):] = cr.T_e[loc_add:cr.ne]  # copy old values forward
+                cr.T_e[loc_add:(loc_add+ne_add)] = new_T_val    # fill the gap
+
+                new_k_val = 3.5
+                cr.k_e = np.resize(cr.k_e, new_ne)
+                cr.k_e[(loc_add+ne_add):] = cr.k_e[loc_add:cr.ne]
+                cr.k_e[loc_add:(loc_add+ne_add)] = new_k_val
+
+                new_compo_val = np.array([0.0327, 0.0248, 0.1540, 0.6662, 0.0280, 0.0359, 0.0064, 0.0010, 0.0504, 0.0100])
+                cr.C_e = np.resize(cr.C_e, (new_ne, cr.ncomponents))
+                for i in range(cr.ne-1, loc_add, -1):
+                    cr.C_e[i+ne_add][:] = cr.C_e[i][:] 
+                for i in range(ne_add):
+                    cr.C_e[loc_add+i][:] = new_compo_val[:]
+
+                cr.xs = np.resize(cr.xs, new_nx)
+                cr.xs[:] = new_xs[:]
+                cr.xs_e = np.resize(cr.xs_e, new_ne)
+                cr.xs_e[:] = new_xs_e[:]
+                cr.nx = new_nx
+                cr.ne = new_ne
+
+                # only resize needed, no copying of values
+                cr.Cp_e = np.resize(cr.Cp_e, new_ne)
+                cr.rho_e = np.resize(cr.rho_e, new_ne)
+                cr.pres_e = np.resize(cr.pres_e, new_ne)
+                cr.pres = np.resize(cr.pres, new_nx)
+                cr.mass_e = np.resize(cr.mass_e, new_ne)
+
+                print "pressure in elements was:"
+                print cr.pres_e
+                print cr.xs_e
+                cr.updatePerplex(initial=True)
+                cr.updateGridToRho()
+                cr.updatePressure()
+                print "pressure in elements is:"
+                print cr.pres_e
+                print cr.xs_e
+            elif eventType == 2:
+                cr.bnd_lower_temperature = 273. + 900.
+            elif eventType == 3:
+                cr.bnd_lower_temperature = 273. + 600.
+            else:
+                raise Exception("Unknown event type")
 
 
+#plt.show()
+
+#allrecdpt = np.array(cr.record_depths)
+#allrecval = np.array(cr.record_values)
+#allreclab = cr.record_valuesources.keys()
+#allrectime = np.array(cr.record_times)
+
+uniquephases = []
+for recrec in cr.recdata:
+    for i in range(recrec.grid.nx):
+        for phase in recrec.data["!ph"][i]:
+            if phase in uniquephases:
+                pass
+            else:
+                uniquephases.append(phase)
+uniquephases.sort()
+
+# TODO account for immiscibility (Fsp, etc )
+# currently just mixed
+stablephases = []
+for rec in cr.recdata:
+    stablephases.append(Grid.GriddedData(rec.grid.nx, rec.grid.xs))
+    stablephases[-1].addMetaData("time", rec.metadata["time"])
+    for aphase in uniquephases:
+        stablephases[-1].addData(aphase, [0] * rec.grid.nx)
+    for idepth in range(rec.grid.nx):
+        for aphase in uniquephases:
+            phaselocs = [i for i, j in enumerate(rec.data["!ph"][idepth]) if j == aphase]
+            for i in phaselocs:
+                # add together similar phases --> immiscibility disappears and are treated
+                # as mixed phases
+                stablephases[-1].data[aphase][idepth] += rec.data["!wp"][idepth][i]
+
+#### plot single value fields
+plt.close('all')
+
+plt.figure()
+depthres = 60
+times = np.zeros(len(stablephases))
+xs = np.linspace(0,35e3,depthres)
+recfields = ['T', 'rho', 'Vs', 'Vp']
+plotsqr = int(len(recfields)**0.5-1e-12)+1
+TDW = np.zeros((len(recfields), depthres, len(cr.recdata)))
+for i in range(len(cr.recdata)):
+    sys.stdout.write(" " + str(i) + "\r")
+    sys.stdout.flush()
+    for ifield in range(len(recfields)):
+        fieldvals = np.array(ip.interpolate(cr.recdata[i].grid.xs, cr.recdata[i].data[recfields[ifield]], xs))
+        TDW[ifield,:,i] = fieldvals
+    times[i] = cr.recdata[i].metadata["time"]
+
+XS, YS = np.meshgrid(times/(SECINYR*1e3), -xs)
+for i in range(len(recfields)):
+    plt.subplot(plotsqr,plotsqr,i)
+    CS = plt.contourf(XS, YS, TDW[i,:,:], 30)
+    cbar = plt.colorbar(CS)
+    plt.title(recfields[i])
+
+#### plot phase assemblages and weight percentages 
+
+plt.figure()
+depthres = 60
+TDA = np.zeros((depthres, len(stablephases)))
+times = np.zeros(len(stablephases))
+xs = np.linspace(0,35e3,depthres)
+considerphases = ['Bio', 'Gt', 'Melt', 'q']
+plotsqr = int(len(considerphases)**0.5-1e-12)+1
+TDW = np.zeros((len(considerphases), depthres, len(stablephases)))
+for i in range(len(stablephases)):
+    sys.stdout.write(" " + str(i) + "\r")
+    sys.stdout.flush()
+    iasm = 1
+    phaseex = xs * 0.0
+    iphase = 0
+    for aphase in considerphases:
+        phasewts = np.array(ip.interpolate(stablephases[i].grid.xs, stablephases[i].data[aphase], xs, notFoundVal=0.0))
+        TDW[iphase,:,i] = phasewts
+        phaseex = phaseex + (phasewts > 0) * float(iasm)
+        iasm = iasm * 2
+        iphase = iphase + 1
+    TDA[:,i] = phaseex
+    times[i] = stablephases[i].metadata["time"]
+
+XS, YS = np.meshgrid(times/(60.*60.*24.*365.*1e3), -xs)
+#CS = plt.contourf(XS, YS, TDA)
+#cbar = plt.colorbar(CS)
+#plt.show()
+
+for i in range(len(considerphases)):
+    plt.subplot(plotsqr,plotsqr,i)
+    CS = plt.contourf(XS, YS, TDW[i,:,:])
+    cbar = plt.colorbar(CS)
+    plt.title(considerphases[i])
 
 
+plt.show()
+#considerphases = ['Melt', 'Bio', 'Gt']
+#assemblages = []
+#for rec in stablephases:
+#    assemblages.append(Grid.GriddedData(rec.grid.nx, rec.grid.xs))
+#    for aphase in considerphases:
+#        assemblages[-1].addData(aphase, [0] * rec.grid.nx)
+#
+#    for idepth in range(rec.grid.nx):
+#        for aphase in considerphases:
+#            if aphase not in rec.data.keys()
+#                raise Exception("requested a phase that is nowhere stable")
+#            if rec.data[aphase][idepth] > 0.0:
+#                assemblages
+#
 
+print "You can do plt.show()"
+x = "."
+while len(x) == 0 or x[0] != "!":
+    x=raw_input(":")
+    try:
+        exec(x)
+    except Exception as e:
+        print e
 
+mineral = 'Melt'
+for it in range(0,len(cr.recdata),10):
+    x=cr.recdata[it].grid.xs
+    y1=cr.recdata[it].data["T"]
+    y2=stablephases[it].data[mineral]
+    plt.plot(x,y1)
+    plt.twinx()
+    plt.plot(x,y2)
+    plt.show()
 
+#plt.close('all')
+#f, (ax1, ax2) = plt.subplots(1,2,sharey=True)
+#ax1.plot(cr.T_e, -cr.xs_e)
+#ax2.plot(cr.Cp_e, -cr.xs_e)
+#plt.show()
 
 

@@ -1,31 +1,72 @@
 from mpi4py import MPI
 import sys
+import getopt
 import numpy as np
 import pyearth_sub as pe
 #from matplotlib import pyplot as plt
 import csv
 import os
 import math
+import copy
+
+MODE_POSTPROC = 2
+MODE_RUNMODEL = 1
+run_mode = MODE_RUNMODEL
+
+#opts, args = getopt.getopt(argv,"hi:o:",["ifile=","ofile="])
+try:
+    opts, args = getopt.getopt(sys.argv[1:],"hm:",["runmode="])
+except getopt.GetoptError:
+    print argv[0], ' -m RUNMODE'
+    sys.exit(2)
+
+for opt, arg in opts:
+    if opt == '-h':
+        print argv[0], ' -m RUNMODE'
+    elif opt in ("-m", "--runmode"):
+        if arg == 'postproc':
+            run_mode = MODE_POSTPROC
+        elif arg == 'runmodel':
+            run_mode = MODE_RUNMODEL
+        else:
+            print "Run modes: postproc, runmodel"
+            sys.exit(2)
 
 sys.path.insert(0, ".")
 from config import CONFIG
 
 if CONFIG['OUTPUT_FILE']:
-    try:
-        os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'])
-    except Exception as e:
-        pass  # directory probable exists already...
+    if run_mode == MODE_RUNMODEL:
+        try:
+            os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'])
+        except Exception as e:
+            pass  # directory probable exists already...
+    elif run_mode == MODE_POSTPROC:
+        if os.path.isdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME']):
+            print "Reading from " + CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME']
+        else:
+            print "Output directory " + CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + " does not exist"
+            sys.exit(2)
+elif run_mode == MODE_POSTPROC:
+    print "Postprocessing but OUTPUT_FILE == False"
+    sys.exit(2)
+
 
 nruns = 0
 
+GLOBALCONFIG = copy.deepcopy(CONFIG) 
+
 while nruns >= 0:
+    # get a fresh copy of CONFIG[] for each run
+    del CONFIG
+    CONFIG = copy.deepcopy(GLOBALCONFIG)
+
     if CONFIG['MPI']:
         mpi_comm = MPI.COMM_WORLD
         mpi_size = mpi_comm.Get_size()
         mpi_rank = mpi_comm.Get_rank()
         mpi_virt_rank = mpi_rank + mpi_size * nruns
-        mpi_file_postfix = "X" + ("{:0>3d}".format(mpi_virt_rank))
-        mpi_dir = "/x" + ("{:0>3d}".format(mpi_virt_rank))
+        mpi_dir = "/x" + ("{:0>4d}".format(mpi_virt_rank))
         if mpi_virt_rank > CONFIG['MPI_VIRT_PROCS']:
             # we're done here
             mpi_comm.Barrier()
@@ -36,7 +77,6 @@ while nruns >= 0:
         mpi_comm = None
         mpi_rank = 0
         mpi_size = 1
-        mpi_file_postfix = ""
         mpi_dir = ""
         mpi_virt_rank = 0
 
@@ -49,27 +89,36 @@ while nruns >= 0:
 
     if CONFIG['OUTPUT_FILE']:
         if CONFIG['MPI']:
-            try:
-                os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir)
-            except Exception as e:
-                if CONFIG['OUTPUT_OVERWRITE']:
-                    print str(mpi_virt_rank) + "> Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
+            if run_mode == MODE_RUNMODEL:
+                try:
+                    os.mkdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir)
+                except Exception as e:
+                    if CONFIG['OUTPUT_OVERWRITE']:
+                        print str(mpi_virt_rank) + "> Error in mkdir, directory exists? Don't care, OUTPUT_OVERWRITE == True"
+                    else:
+                        raise e
+            elif run_mode == MODE_POSTPROC:
+                if os.path.isdir(CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir):
+                    print "Reading from " + CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir
                 else:
-                    raise e
+                    print "Directory " + CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir + " does not exist"
+                    sys.exit(2)
         else:
             pass
 
         Output_File_Path = CONFIG['OUTDIR'] + "/" + CONFIG['MODELNAME'] + mpi_dir + "/"
 
-        csvmetafile = open(Output_File_Path + "meta", "wb")
-        csvmetafile.write(str(DATA_FORMAT_VERSION)+"\n")
-        csvmetafile.write(str(mpi_virt_rank)+"\n")
-        csvmetafile.close()
+        if run_mode == MODE_RUNMODEL:
+            csvmetafile = open(Output_File_Path + "meta", "wb")
+            csvmetafile.write(str(DATA_FORMAT_VERSION)+"\n")
+            csvmetafile.write(str(mpi_virt_rank)+"\n")
+            csvmetafile.close()
 
         csvmetafile = open(Output_File_Path + "meta", "ab")
-        csvmetawriter = csv.writer(csvmetafile, delimiter=",", quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
 
-        csvmetawriter.writerow(['tstep', 'time_ma'])
+        if run_mode == MODE_RUNMODEL:
+            csvmetawriter = csv.writer(csvmetafile, delimiter=",", quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
+            csvmetawriter.writerow(['tstep', 'time_ma'])
 
     if CONFIG['RESTART']:
         Restart_In_Path = CONFIG['RESTART_INDIR'] + "/" + CONFIG['RESTART_MODELNAME'] + mpi_dir + "/"
@@ -90,10 +139,11 @@ while nruns >= 0:
         CONFIG['KT_RELATION_PARAMS'][0] = minval + mpi_virt_rank*(maxval-minval)/(CONFIG['MPI_VIRT_PROCS']-1)
         print "MPI, #" + str(mpi_rank) + ", virt#" + str(mpi_virt_rank) + ": param is " + str(CONFIG['KT_RELATION_PARAMS'][0])
 
-        paramfile = open(Output_File_Path + "params", "wb")
-        for i in range(1):
-            paramfile.write(str(CONFIG['KT_RELATION_PARAMS'][i]) + "\n")
-        paramfile.close()
+        if run_mode == MODE_RUNMODEL:
+            paramfile = open(Output_File_Path + "params", "wb")
+            for i in range(1):
+                paramfile.write(str(CONFIG['KT_RELATION_PARAMS'][i]) + "\n")
+            paramfile.close()
 
     elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 2:
         if CONFIG['KT_RELATION_TYPE'] != 2:
@@ -121,10 +171,11 @@ while nruns >= 0:
         CONFIG['KT_RELATION_PARAMS'][0] = minval1 + math.floor(mpi_virt_rank/div2)*(maxval1-minval1)/(div1-1.0)
         CONFIG['KT_RELATION_PARAMS'][1] = minval2 + (mpi_virt_rank - div2*math.floor(mpi_virt_rank/div2))*(maxval2-minval2)/(div2-1.0)
 
-        paramfile = open(Output_File_Path + "params", "wb")
-        for i in range(2):
-            paramfile.write(str(CONFIG['KT_RELATION_PARAMS'][i]) + "\n")
-        paramfile.close()
+        if run_mode == MODE_RUNMODEL:
+            paramfile = open(Output_File_Path + "params", "wb")
+            for i in range(2):
+                paramfile.write(str(CONFIG['KT_RELATION_PARAMS'][i]) + "\n")
+            paramfile.close()
 
         print "MPI, #" + str(mpi_rank) + ", virt#" + str(mpi_virt_rank) + ": params are " + str(CONFIG['KT_RELATION_PARAMS'][0]) + "," + str(CONFIG['KT_RELATION_PARAMS'][1]) + "\n"
     elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 20:
@@ -156,25 +207,78 @@ while nruns >= 0:
         if CONFIG['RESTART_POST_MOD'] == 1:
             CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
             CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
-            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
             CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['L_KM'][0]
             CONFIG['EROSION_SPEED_M_MA'] = vEmin + pos3 * (vEmax-vEmin) / (div3-1.0)
             CONFIG['MAX_TIME_TO_ERODE_MA'] = CONFIG['RESTART_POST_MOD_PARAMS'][0] / CONFIG['EROSION_SPEED_M_MA']
         elif CONFIG['RESTART_POST_MOD'] == 0:
             CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
             CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
-            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 , CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][0] + hLmin + pos2 * (hLmax-hLmin) / (div2-1.0))
             CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['L_KM'][0]
             CONFIG['EROSION_SPEED_M_MA'] = 0.0
             CONFIG['MAX_TIME_TO_ERODE_MA'] = 0.0
         else:
             raise Exception("!! RESTART_POST_MOD has to be zero or one for this MPI type")
 
-        paramfile = open(Output_File_Path + "params", "wb")
-        paramfile.write(str(CONFIG['RESTART_POST_MOD_PARAMS'][0]) + "\n")
-        paramfile.write(str(CONFIG['L_KM']) + "\n")
-        paramfile.write(str(CONFIG['EROSION_SPEED_M_MA']) + "\n")
-        paramfile.close()
+        if run_mode == MODE_RUNMODEL:
+            paramfile = open(Output_File_Path + "params", "wb")
+            paramfile.write(str(CONFIG['RESTART_POST_MOD_PARAMS'][0]) + "\n")
+            paramfile.write(str(CONFIG['L_KM']) + "\n")
+            paramfile.write(str(CONFIG['EROSION_SPEED_M_MA']) + "\n")
+            paramfile.close()
+
+    elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 21: 
+        if mpi_size <= 1:
+            raise Exception("MPI with one processor?")
+
+        bTmin = CONFIG['MPI_VARIATION_PARAMS'][0]
+        bTmax = CONFIG['MPI_VARIATION_PARAMS'][1]
+        hOmin = CONFIG['MPI_VARIATION_PARAMS'][2]
+        hOmax = CONFIG['MPI_VARIATION_PARAMS'][3]
+        vEmin = CONFIG['MPI_VARIATION_PARAMS'][4]
+        vEmax = CONFIG['MPI_VARIATION_PARAMS'][5]
+
+        div1 = math.floor((CONFIG['MPI_VIRT_PROCS'])**(1./3.))
+        div2 = math.sqrt(math.floor(CONFIG['MPI_VIRT_PROCS'] / div1))
+        div3 = math.floor(CONFIG['MPI_VIRT_PROCS']/(div1*div2))
+
+        if mpi_virt_rank >= div1*div2*div3:
+            # I'm an unused processor. Poor me.
+            print "?? MPI, #" + str(mpi_rank) + ", virt#" + str(mpi_virt_rank) + ": Skip\n"
+            mpi_comm.Barrier()
+            MPI.Finalize()
+            sys.exit(0)
+
+        pos3 = math.floor(mpi_virt_rank / (div1*div2))
+        pos2 = math.floor((mpi_virt_rank - pos3 * div1 * div2) / div1)
+        pos1 = mpi_virt_rank % div1
+
+        if CONFIG['RESTART_POST_MOD'] == 1:
+            CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
+            CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][0], CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][1])
+            CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3
+            CONFIG['BND_BOT_TEMP'] = bTmin + pos2 * (bTmax-bTmin) / (div2-1.0)
+            CONFIG['EROSION_SPEED_M_MA'] = vEmin + pos3 * (vEmax-vEmin) / (div3-1.0)
+            CONFIG['MAX_TIME_TO_ERODE_MA'] = CONFIG['RESTART_POST_MOD_PARAMS'][0] / CONFIG['EROSION_SPEED_M_MA']
+        elif CONFIG['RESTART_POST_MOD'] == 0:
+            CONFIG['RESTART_POST_MOD_PARAMS'] = np.array((0.0),ndmin=1)
+            CONFIG['RESTART_POST_MOD_PARAMS'][0] = hOmin + pos1 * (hOmax-hOmin) / (div1-1.0)
+            CONFIG['L_KM'] = ( CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][0], CONFIG['RESTART_POST_MOD_PARAMS'][0] / 1e3 + CONFIG['L_KM'][1])
+            CONFIG['MOHO_DEPTH_KM'] = CONFIG['MOHO_DEPTH_KM'] + CONFIG['L_KM'][0]
+            CONFIG['BND_BOT_TEMP'] = bTmin + pos2 * (bTmax-bTmin) / (div2-1.0)
+            CONFIG['EROSION_SPEED_M_MA'] = 0.0 
+            CONFIG['MAX_TIME_TO_ERODE_MA'] = 0.0 
+        else:
+            raise Exception("!! RESTART_POST_MOD has to be zero or one for this MPI type")
+
+        if run_mode == MODE_RUNMODEL:
+            paramfile = open(Output_File_Path + "params", "wb")
+            paramfile.write(str(CONFIG['RESTART_POST_MOD_PARAMS'][0]) + "\n")
+            paramfile.write(str(CONFIG['BND_BOT_TEMP']) + "\n")
+            paramfile.write(str(CONFIG['EROSION_SPEED_M_MA']) + "\n")
+            paramfile.close()
         
     elif CONFIG['MPI'] and CONFIG['MPI_VARIATION_TYPE'] == 10:
         if CONFIG['KT_RELATION_TYPE'] != 2:
@@ -201,7 +305,6 @@ while nruns >= 0:
     # mesh
     xs = np.linspace(STATUS['L'][0], STATUS['L'][1], num=STATUS['NX'])
     # to demonstrate irreg grid:  + 4e3*(np.random.rand(NX)-0.5)
-
 
     # initial fields
 
@@ -291,7 +394,6 @@ while nruns >= 0:
         STATUS['curTime'] = 0.0
 
     pe.initTemp(STATUS, Tini, xs)
-
 
     if CONFIG['RHO0_TYPE'] == 0:
         # constant rho0
